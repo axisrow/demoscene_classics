@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DEMOSCENE CLASSICS · JS Demo Pack</title>
+<link rel="stylesheet" href="index.css">
+</head>
+<body>
+<header>
+  <h1>DEMOSCENE CLASSICS</h1>
+  <div class="sub">⌬ &nbsp; JAVASCRIPT &nbsp; DEMO &nbsp; PACK &nbsp; ⌬</div>
+  <div class="marquee"><span>*** WELCOME TO THE GREETZ SCROLLER *** 10 CLASSIC EFFECTS RENDERED IN PURE CANVAS 2D *** NO FRAMEWORKS *** NO RUNTIME DEPENDENCIES *** CLICK A CARD TO RUN ***</span></div>
+</header>
+
+<main>
+  <div class="grid" id="grid"></div>
+</main>
+
+<footer>
+  <span class="neon">JS DEMO PACK</span> &nbsp;·&nbsp; 2026 &nbsp;·&nbsp; RENDERED WITH &lt;canvas&gt;
+</footer>
+
+<script src="dist/demoscene.js"></script>
+<script>
+const EFFECTS = [
+  { file: '01-plasma.html', api: 'plasma', name: 'PLASMA', desc: 'Sum-of-sines color fields flowing through a cyclic palette.', hue: 190 },
+  { file: '02-fire.html', api: 'fire', name: 'FIRE', desc: 'DOOM-style heat buffer rising up with damping and decay.', hue: 25 },
+  { file: '03-starfield.html', api: 'starfield', name: 'STARFIELD', desc: 'Warp-speed 3D starfield with motion-trail streaks.', hue: 220 },
+  { file: '04-metaballs.html', api: 'metaballs', name: 'METABALLS', desc: 'Gooey isosurface blobs on Lissajous paths.', hue: 150 },
+  { file: '05-tunnel.html', api: 'tunnel', name: 'TUNNEL', desc: 'Procedural rotating tunnel with depth fog.', hue: 40 },
+  { file: '06-mandelbrot.html', api: 'mandelbrot', name: 'MANDELBROT', desc: 'Auto-zooming fractal with smooth escape-time coloring.', hue: 260 },
+  { file: '07-sine-scroller.html', api: 'sineScroller', name: 'SINE SCROLLER', desc: 'The iconic wavy greets banner over a starfield.', hue: 300 },
+  { file: '08-rotozoom.html', api: 'rotozoom', name: 'ROTOZOOM', desc: 'Rotate and zoom a procedural checker/radial texture.', hue: 160 },
+  { file: '09-feedback.html', api: 'feedback', name: 'FEEDBACK', desc: 'Recursive video-feedback trails. Move the pointer to steer.', hue: 320 },
+  { file: '10-copper-bars.html', api: 'copperBars', name: 'COPPER BARS', desc: 'Amiga-style rainbow gradient bars gliding down the screen.', hue: 35 }
+];
+
+const grid = document.getElementById('grid');
+for (const [index, effect] of EFFECTS.entries()) {
+  const card = document.createElement('a');
+  card.className = 'card';
+  card.href = effect.file;
+  card.innerHTML = `
+    <div class="num">${String(index + 1).padStart(2, '0')} / ${String(EFFECTS.length).padStart(2, '0')}</div>
+    <div class="preview"><canvas aria-label="${effect.name} animated preview"></canvas></div>
+    <div class="body">
+      <div class="name" style="text-shadow:0 0 8px hsl(${effect.hue},100%,60%)">${effect.name}</div>
+      <div class="desc">${effect.desc}</div>
+      <div class="run">▶ RUN ▸</div>
+    </div>`;
+  grid.appendChild(card);
+  Demoscene[effect.api](card.querySelector('canvas'), { quality: 'preview' });
+}
+</script>
+</body>
+</html>

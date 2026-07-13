@@ -1,0 +1,51 @@
+:root {
+  --hud-color: #0ff;
+  --hud-glow: #0ff;
+  --link-color: #f0f;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+}
+
+canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+body.pixelated canvas {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.hud {
+  position: fixed;
+  z-index: 5;
+  top: 12px;
+  left: 14px;
+  color: var(--hud-color);
+  font: 14px/1.4 'Courier New', monospace;
+  letter-spacing: 1px;
+  text-shadow: 0 0 6px var(--hud-glow);
+}
+
+.hud a {
+  color: var(--link-color);
+  text-decoration: none;
+  text-shadow: 0 0 6px var(--link-color);
+}
+
+.hud a:hover,
+.hud a:focus-visible {
+  color: #000;
+  background: var(--link-color);
+  outline: 2px solid var(--link-color);
+  text-shadow: none;
+}

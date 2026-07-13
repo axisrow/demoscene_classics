@@ -1,0 +1,15 @@
+{
+  "name": "demoscene-classics",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Beginner-friendly browser scripts for classic Canvas 2D demoscene effects.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "npm run build && node --test",
+    "check": "npm test"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}
