@@ -36,6 +36,19 @@ const EFFECTS = [
   { file: '10-copper-bars.html', api: 'copperBars', name: 'COPPER BARS', desc: 'Amiga-style rainbow gradient bars gliding down the screen.', hue: 35 }
 ];
 
+const PREVIEW_SKINS = {
+  plasma: { render: { resolution: 0.2 } },
+  fire: { render: { resolution: 0.2 } },
+  starfield: { render: { resolution: 0.7 }, particles: { particleCount: 120 } },
+  metaballs: { render: { resolution: 0.2 }, field: { pointCount: 3 } },
+  tunnel: { render: { resolution: 0.2 } },
+  mandelbrot: { render: { resolution: 0.15, smoothing: true } },
+  sineScroller: { render: { resolution: 0.7 }, stars: { count: 60 } },
+  rotozoom: { render: { resolution: 0.25 } },
+  feedback: { render: { resolution: 0.7 } },
+  copperBars: { render: { resolution: 0.3 } }
+};
+
 const grid = document.getElementById('grid');
 for (const [index, effect] of EFFECTS.entries()) {
   const card = document.createElement('a');
@@ -50,7 +63,7 @@ for (const [index, effect] of EFFECTS.entries()) {
       <div class="run">▶ RUN ▸</div>
     </div>`;
   grid.appendChild(card);
-  Demoscene[effect.api](card.querySelector('canvas'), { quality: 'preview' });
+  Demoscene[effect.api](card.querySelector('canvas'), PREVIEW_SKINS[effect.api]);
 }
 </script>
 </body>

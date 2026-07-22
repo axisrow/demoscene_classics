@@ -1,7 +1,134 @@
 (() => {
+  // src/config.js
+  function isPlainObject(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+  function cloneValue(value) {
+    if (Array.isArray(value)) return value.map(cloneValue);
+    if (isPlainObject(value)) {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneValue(item)]));
+    }
+    return value;
+  }
+  function freezeValue(value) {
+    if (Array.isArray(value)) value.forEach(freezeValue);
+    else if (isPlainObject(value)) Object.values(value).forEach(freezeValue);
+    return value !== null && typeof value === "object" ? Object.freeze(value) : value;
+  }
+  function assertKnownKeys(effectName, input, defaults, path = effectName) {
+    if (!isPlainObject(input)) throw new TypeError(`${path} must be an object.`);
+    for (const [key, value] of Object.entries(input)) {
+      if (!(key in defaults)) throw new RangeError(`Unknown option: ${path}.${key}`);
+      const template = defaults[key];
+      if (isPlainObject(value) && isPlainObject(template)) {
+        assertKnownKeys(effectName, value, template, `${path}.${key}`);
+      } else if (Array.isArray(value) && Array.isArray(template) && isPlainObject(template[0])) {
+        value.forEach((item, index) => assertKnownKeys(
+          effectName,
+          item,
+          template[0],
+          `${path}.${key}[${index}]`
+        ));
+      }
+    }
+  }
+  function mergeValue(defaultValue, inputValue) {
+    if (inputValue === void 0) return cloneValue(defaultValue);
+    if (isPlainObject(defaultValue) && isPlainObject(inputValue)) {
+      const result = {};
+      const keys = /* @__PURE__ */ new Set([...Object.keys(defaultValue), ...Object.keys(inputValue)]);
+      for (const key of keys) {
+        result[key] = mergeValue(defaultValue[key], inputValue[key]);
+      }
+      return result;
+    }
+    return cloneValue(inputValue);
+  }
+  function assertNumber(value, path, { min = -Infinity, max = Infinity, integer = false } = {}) {
+    if (!Number.isFinite(value) || value < min || value > max || integer && !Number.isInteger(value)) {
+      const kind = integer ? "an integer" : "a finite number";
+      throw new RangeError(`${path} must be ${kind} between ${min} and ${max}.`);
+    }
+  }
+  function assertBoolean(value, path) {
+    if (typeof value !== "boolean") throw new TypeError(`${path} must be a boolean.`);
+  }
+  function assertString(value, path, { allowEmpty = false } = {}) {
+    if (typeof value !== "string" || !allowEmpty && value.length === 0) {
+      throw new TypeError(`${path} must be a${allowEmpty ? "" : " non-empty"} string.`);
+    }
+  }
+  function assertPalette(palette, path, colorCount) {
+    if (!Array.isArray(palette) || palette.length < 2 || palette.length > 64) {
+      throw new RangeError(`${path} must contain between 2 and 64 colours.`);
+    }
+    palette.forEach((color, index) => {
+      assertString(color, `${path}[${index}]`);
+      if (!/^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(color)) {
+        throw new TypeError(`${path}[${index}] must use #rgb or #rrggbb.`);
+      }
+    });
+    assertNumber(colorCount, path.replace(/palette$/, "colorCount"), {
+      min: 2,
+      max: 4096,
+      integer: true
+    });
+  }
+  function validateCommonConfig(effectName, config) {
+    const { runtime, render, motion, appearance } = config;
+    assertBoolean(runtime.autoStart, `${effectName}.runtime.autoStart`);
+    assertNumber(runtime.maxFps, `${effectName}.runtime.maxFps`, { min: 1, max: 240 });
+    assertNumber(runtime.pixelRatio, `${effectName}.runtime.pixelRatio`, { min: 1, max: 2 });
+    assertBoolean(runtime.pauseWhenHidden, `${effectName}.runtime.pauseWhenHidden`);
+    assertNumber(render.resolution, `${effectName}.render.resolution`, { min: 0.1, max: 1 });
+    assertBoolean(render.smoothing, `${effectName}.render.smoothing`);
+    assertNumber(motion.speed, `${effectName}.motion.speed`, { min: Number.MIN_VALUE });
+    assertPalette(appearance.palette, `${effectName}.appearance.palette`, appearance.colorCount);
+    assertString(appearance.backgroundColor, `${effectName}.appearance.backgroundColor`);
+  }
+  function normalizeEffectConfig(effectName, input, defaults, validate = () => {
+  }) {
+    const supplied = input === void 0 ? {} : input;
+    assertKnownKeys(effectName, supplied, defaults);
+    const config = mergeValue(defaults, supplied);
+    validateCommonConfig(effectName, config);
+    validate(config);
+    return freezeValue(config);
+  }
+  function cloneConfig(config) {
+    return cloneValue(config);
+  }
+  function createEffectDefaults(overrides = {}) {
+    return freezeValue(mergeValue({
+      runtime: COMMON_DEFAULTS.runtime,
+      render: COMMON_DEFAULTS.render,
+      motion: COMMON_DEFAULTS.motion,
+      appearance: COMMON_DEFAULTS.appearance
+    }, overrides));
+  }
+  var COMMON_DEFAULTS = Object.freeze({
+    runtime: Object.freeze({
+      autoStart: true,
+      maxFps: 60,
+      pixelRatio: 1,
+      pauseWhenHidden: true
+    }),
+    render: Object.freeze({
+      resolution: 1,
+      smoothing: false
+    }),
+    motion: Object.freeze({ speed: 1 }),
+    appearance: Object.freeze({
+      palette: Object.freeze(["#000000", "#ffffff"]),
+      colorCount: 256,
+      backgroundColor: "#000000"
+    })
+  });
+
   // src/runtime.js
   var RUNTIME_KEY = Symbol.for("demoscene-classics.runtime");
   var MAX_DELTA_SECONDS = 0.05;
+  var FRAME_INTERVAL_TOLERANCE_MS = 1;
   function resolveCanvas(target) {
     const canvas = typeof target === "string" ? globalThis.document?.querySelector(target) : target;
     if (!canvas) {
@@ -12,10 +139,12 @@
     }
     return canvas;
   }
-  function measureCanvas(canvas) {
+  function measureCanvas(canvas, pixelRatio = 1) {
     const rect = typeof canvas.getBoundingClientRect === "function" ? canvas.getBoundingClientRect() : null;
-    const width = Math.max(1, Math.round(rect?.width || canvas.clientWidth || canvas.width || 1));
-    const height = Math.max(1, Math.round(rect?.height || canvas.clientHeight || canvas.height || 1));
+    const cssWidth = rect?.width || canvas.clientWidth || canvas.width || 1;
+    const cssHeight = rect?.height || canvas.clientHeight || canvas.height || 1;
+    const width = Math.max(1, Math.round(cssWidth * pixelRatio));
+    const height = Math.max(1, Math.round(cssHeight * pixelRatio));
     return { width, height };
   }
   function createScheduler() {
@@ -72,36 +201,50 @@
     }
     return globalThis[RUNTIME_KEY];
   }
-  function mountEffect(target, rendererFactory, options = {}) {
+  function mountEffect(target, rendererFactory, config) {
     const canvas = resolveCanvas(target);
-    const quality = options.quality ?? "full";
-    if (quality !== "full" && quality !== "preview") {
-      throw new RangeError('Demoscene quality must be "full" or "preview".');
-    }
+    const { autoStart, maxFps, pixelRatio, pauseWhenHidden } = config.runtime;
+    const minimumFrameInterval = maxFps === Infinity ? 0 : 1e3 / maxFps;
     const scheduler = getScheduler();
     let renderer;
     let running = false;
     let visible = true;
     let destroyed = false;
     let elapsed = 0;
+    let staticTime = null;
     let lastTimestamp = null;
+    let lastRenderTimestamp = null;
+    let pendingDelta = 0;
     let resizeObserver = null;
     let intersectionObserver = null;
     let fallbackResizeListener = null;
     let width = 0;
     let height = 0;
+    let renderedFrames = 0;
+    let lastFrameMs = 0;
+    let totalFrameMs = 0;
+    function renderFrame(frame) {
+      const started = globalThis.performance?.now?.() ?? Date.now();
+      renderer.render(frame);
+      lastFrameMs = (globalThis.performance?.now?.() ?? Date.now()) - started;
+      totalFrameMs += lastFrameMs;
+      renderedFrames++;
+    }
     function applySize(force = false) {
       if (destroyed) return;
-      const size = measureCanvas(canvas);
+      const size = measureCanvas(canvas, pixelRatio);
       if (!force && size.width === width && size.height === height) return;
       width = size.width;
       height = size.height;
       canvas.width = width;
       canvas.height = height;
       renderer?.resize?.(width, height);
+      if (renderer && staticTime !== null && !running) {
+        renderFrame({ time: staticTime, delta: 0 });
+      }
     }
     applySize(true);
-    renderer = rendererFactory({ canvas, quality });
+    renderer = rendererFactory({ canvas, config });
     if (!renderer || typeof renderer.render !== "function") {
       throw new TypeError("A Demoscene renderer must provide render().");
     }
@@ -110,7 +253,10 @@
       start() {
         if (destroyed || running) return controller;
         running = true;
+        staticTime = null;
         lastTimestamp = null;
+        lastRenderTimestamp = null;
+        pendingDelta = 0;
         scheduler.add(controller);
         return controller;
       },
@@ -118,12 +264,36 @@
         if (!running) return controller;
         running = false;
         lastTimestamp = null;
+        lastRenderTimestamp = null;
+        pendingDelta = 0;
         scheduler.remove(controller);
         return controller;
       },
       resize() {
         applySize(true);
         return controller;
+      },
+      renderOnce(timeSeconds = 0) {
+        if (destroyed) return controller;
+        if (!Number.isFinite(timeSeconds) || timeSeconds < 0) {
+          throw new RangeError("Demoscene renderOnce time must be a non-negative number.");
+        }
+        controller.stop();
+        elapsed = timeSeconds;
+        staticTime = timeSeconds;
+        applySize(true);
+        return controller;
+      },
+      getConfig() {
+        return cloneConfig(config);
+      },
+      getStats() {
+        return {
+          backend: renderer?.getStats?.().backend ?? "canvas2d",
+          renderedFrames,
+          lastFrameMs,
+          averageFrameMs: renderedFrames ? totalFrameMs / renderedFrames : 0
+        };
       },
       destroy() {
         if (destroyed) return;
@@ -142,7 +312,7 @@
         renderer = null;
       },
       _isRunnable() {
-        return running && visible && !destroyed;
+        return running && visible && !destroyed && (typeof renderer?.isAvailable !== "function" || renderer.isAvailable());
       },
       _tick(timestamp) {
         let delta = 0;
@@ -150,10 +320,18 @@
           delta = Math.min(MAX_DELTA_SECONDS, Math.max(0, (timestamp - lastTimestamp) / 1e3));
         }
         lastTimestamp = timestamp;
-        elapsed += delta;
-        renderer.render({ time: elapsed, delta });
+        pendingDelta += delta;
+        if (lastRenderTimestamp !== null && timestamp - lastRenderTimestamp + FRAME_INTERVAL_TOLERANCE_MS < minimumFrameInterval) {
+          return;
+        }
+        lastRenderTimestamp = timestamp;
+        const renderDelta = pendingDelta;
+        pendingDelta = 0;
+        elapsed += renderDelta;
+        renderFrame({ time: elapsed, delta: renderDelta });
       }
     };
+    renderer.setWake?.(() => scheduler.wake());
     function onPointerMove(event) {
       const rect = canvas.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
@@ -172,13 +350,15 @@
       fallbackResizeListener = () => applySize();
       globalThis.addEventListener("resize", fallbackResizeListener);
     }
-    if (quality === "preview" && typeof globalThis.IntersectionObserver === "function") {
+    if (pauseWhenHidden && typeof globalThis.IntersectionObserver === "function") {
       intersectionObserver = new globalThis.IntersectionObserver((entries) => {
         const entry = entries[entries.length - 1];
         const nextVisible = Boolean(entry?.isIntersecting);
         if (visible === nextVisible) return;
         visible = nextVisible;
         lastTimestamp = null;
+        lastRenderTimestamp = null;
+        pendingDelta = 0;
         if (visible) scheduler.wake();
       });
       intersectionObserver.observe(canvas);
@@ -187,14 +367,17 @@
       canvas.addEventListener("pointermove", onPointerMove);
       canvas.addEventListener("pointerleave", onPointerLeave);
     }
-    if (options.autoStart !== false) controller.start();
+    if (autoStart) controller.start();
     return controller;
   }
 
   // src/install.js
-  function installEffect(name, rendererFactory) {
+  function installEffect(name, rendererFactory, normalizeConfig) {
     const namespace = globalThis.Demoscene && typeof globalThis.Demoscene === "object" ? globalThis.Demoscene : {};
-    namespace[name] = (target, options) => mountEffect(target, rendererFactory, options);
+    namespace[name] = (target, options) => {
+      const config = normalizeConfig(options);
+      return mountEffect(target, rendererFactory, config);
+    };
     globalThis.Demoscene = namespace;
     return namespace[name];
   }
@@ -209,6 +392,22 @@
     const canvas = globalThis.document.createElement("canvas");
     const context = getContext2D(canvas);
     return { canvas, context, image: null, pixels: null, width: 0, height: 0 };
+  }
+  function createDrawingBuffer() {
+    const canvas = globalThis.document.createElement("canvas");
+    const context = getContext2D(canvas);
+    return { canvas, context, width: 1, height: 1 };
+  }
+  function resizeDrawingBuffer(buffer, width, height) {
+    buffer.width = Math.max(2, Math.floor(width));
+    buffer.height = Math.max(2, Math.floor(height));
+    buffer.canvas.width = buffer.width;
+    buffer.canvas.height = buffer.height;
+    return buffer;
+  }
+  function presentDrawingBuffer(context, buffer, width, height, smoothing) {
+    context.imageSmoothingEnabled = smoothing;
+    context.drawImage(buffer.canvas, 0, 0, width, height);
   }
   function resizePixelBuffer(buffer, width, height) {
     buffer.width = Math.max(2, Math.floor(width));
@@ -227,116 +426,215 @@
   function packRgb(red, green, blue) {
     return 255 << 24 | (blue | 0) << 16 | (green | 0) << 8 | (red | 0);
   }
-  function hslToRgb(hue, saturation, lightness) {
-    const s = saturation / 100;
-    const l = lightness / 100;
-    const k = (n) => (n + hue / 30) % 12;
-    const a = s * Math.min(l, 1 - l);
-    const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
-    return [f(0) * 255, f(8) * 255, f(4) * 255];
+  function createSeededRandom(seed) {
+    let state = seed >>> 0;
+    return () => {
+      state = state + 1831565813 | 0;
+      let value = Math.imul(state ^ state >>> 15, 1 | state);
+      value ^= value + Math.imul(value ^ value >>> 7, 61 | value);
+      return ((value ^ value >>> 14) >>> 0) / 4294967296;
+    };
   }
-  var SINE_PHASE_OFFSETS = [0, 2 * Math.PI / 3, 4 * Math.PI / 3];
-  function buildSinePalette(palette, phaseForIndex) {
-    for (let i = 0; i < palette.length; i++) {
-      const phase = phaseForIndex(i);
-      palette[i] = packRgb(
-        Math.floor(128 + 127 * Math.sin(phase + SINE_PHASE_OFFSETS[0])),
-        Math.floor(128 + 127 * Math.sin(phase + SINE_PHASE_OFFSETS[1])),
-        Math.floor(128 + 127 * Math.sin(phase + SINE_PHASE_OFFSETS[2]))
+  function samplePackedPalette(palette, normalized) {
+    const index = Math.min(
+      palette.length - 1,
+      Math.max(0, Math.round(normalized * (palette.length - 1)))
+    );
+    return palette[index];
+  }
+  function parseHexColor(value, label = "color") {
+    if (typeof value !== "string") {
+      throw new TypeError(`Demoscene ${label} must be a hex color string.`);
+    }
+    const match = value.trim().match(/^#([\da-f]{3}|[\da-f]{6})$/i);
+    if (!match) {
+      throw new TypeError(`Demoscene ${label} must use #rgb or #rrggbb.`);
+    }
+    const hex = match[1].length === 3 ? match[1].split("").map((character) => character + character).join("") : match[1];
+    return [
+      Number.parseInt(hex.slice(0, 2), 16),
+      Number.parseInt(hex.slice(2, 4), 16),
+      Number.parseInt(hex.slice(4, 6), 16)
+    ];
+  }
+  function buildGradientPalette(target, colors) {
+    if (!Array.isArray(colors) || colors.length < 2) {
+      throw new RangeError("Demoscene palette must contain at least two hex colors.");
+    }
+    const parsed = colors.map((color, index) => parseHexColor(color, `palette[${index}]`));
+    const segmentCount = parsed.length - 1;
+    for (let index = 0; index < target.length; index++) {
+      const position = index / Math.max(1, target.length - 1) * segmentCount;
+      const leftIndex = Math.min(segmentCount - 1, Math.floor(position));
+      const mix = Math.min(1, position - leftIndex);
+      const left = parsed[leftIndex];
+      const right = parsed[leftIndex + 1];
+      target[index] = packRgb(
+        Math.round(left[0] + (right[0] - left[0]) * mix),
+        Math.round(left[1] + (right[1] - left[1]) * mix),
+        Math.round(left[2] + (right[2] - left[2]) * mix)
       );
     }
-    return palette;
+    return target;
   }
+  function packHexColor(color) {
+    const [red, green, blue] = parseHexColor(color);
+    return packRgb(red, green, blue);
+  }
+  var SINE_PHASE_OFFSETS = [0, 2 * Math.PI / 3, 4 * Math.PI / 3];
 
   // src/effects/plasma.js
-  function createPlasmaRenderer({ canvas, quality }) {
+  var PLASMA_DEFAULTS = createEffectDefaults({
+    render: { resolution: 0.25, smoothing: false },
+    motion: { speed: 1, paletteCycleSpeed: 0.19 },
+    appearance: {
+      palette: [
+        "#80ed12",
+        "#bfbf01",
+        "#ed8012",
+        "#ff4040",
+        "#ed127f",
+        "#bf01bf",
+        "#8012ed",
+        "#4040ff",
+        "#127fed",
+        "#01bfbf",
+        "#12ed80",
+        "#40ff40",
+        "#7fed12"
+      ],
+      colorCount: 256,
+      backgroundColor: "#000000"
+    },
+    field: {
+      frequencies: [0.04, 0.04, 0.04, 1],
+      radialCenterX: 0.5,
+      radialCenterY: 0.5,
+      amplitudes: [1, 1, 1, 1],
+      phaseRates: [1, 0.5, 0.5, 1]
+    }
+  });
+  function normalizePlasmaConfig(input) {
+    return normalizeEffectConfig("plasma", input, PLASMA_DEFAULTS, (config) => {
+      assertNumber(config.motion.paletteCycleSpeed, "plasma.motion.paletteCycleSpeed", { min: 0 });
+      for (const key of ["radialCenterX", "radialCenterY"]) {
+        assertNumber(config.field[key], `plasma.field.${key}`);
+      }
+      for (const key of ["frequencies", "amplitudes", "phaseRates"]) {
+        if (!Array.isArray(config.field[key]) || config.field[key].length !== 4) {
+          throw new RangeError(`plasma.field.${key} must contain four numbers.`);
+        }
+        config.field[key].forEach((value, index) => assertNumber(
+          value,
+          `plasma.field.${key}[${index}]`,
+          key === "frequencies" ? { min: Number.MIN_VALUE } : void 0
+        ));
+      }
+    });
+  }
+  function createPlasmaRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
-    const palette = new Uint32Array(256);
-    const scale = quality === "preview" ? 3 : 4;
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    const { field, motion, render } = config;
+    const totalAmplitude = field.amplitudes.reduce((sum, item) => sum + Math.abs(item), 0) || 1;
     let width = 1;
     let height = 1;
-    function buildPalette4(phase) {
-      buildSinePalette(palette, (index) => Math.PI * 2 * index / 256 + phase);
-    }
     return {
       resize(nextWidth, nextHeight) {
         width = nextWidth;
         height = nextHeight;
-        resizePixelBuffer(buffer, width / scale, height / scale);
+        resizePixelBuffer(buffer, width * render.resolution, height * render.resolution);
       },
       render({ time }) {
-        const phase = time * 1.2;
-        buildPalette4(phase);
-        const offsetX = buffer.width * 0.02;
-        const offsetY = buffer.height * 0.02;
+        const scaledTime = time * motion.speed;
+        const phase = scaledTime * 1.2;
+        const paletteOffset = Math.floor(scaledTime * motion.paletteCycleSpeed * palette.length);
+        const radialX = buffer.width * field.radialCenterX;
+        const radialY = buffer.height * field.radialCenterY;
         let index = 0;
         for (let y = 0; y < buffer.height; y++) {
           for (let x = 0; x < buffer.width; x++) {
-            const nx = x * 0.04;
-            const ny = y * 0.04;
-            let value = Math.sin(nx + phase);
-            value += Math.sin((ny + phase) * 0.5);
-            value += Math.sin((nx + ny + phase) * 0.5);
-            const cx = nx - offsetX;
-            const cy = ny - offsetY;
-            value += Math.sin(Math.sqrt(cx * cx + cy * cy + 1) + phase);
-            const colorIndex = (value + 4) / 8 * 255 & 255;
-            buffer.pixels[index++] = palette[colorIndex];
+            let value = Math.sin(x * field.frequencies[0] + phase * field.phaseRates[0]) * field.amplitudes[0];
+            value += Math.sin(y * field.frequencies[1] + phase * field.phaseRates[1]) * field.amplitudes[1];
+            value += Math.sin((x + y) * field.frequencies[2] + phase * field.phaseRates[2]) * field.amplitudes[2];
+            const cx = (x - radialX) * field.frequencies[0];
+            const cy = (y - radialY) * field.frequencies[1];
+            value += Math.sin(
+              Math.sqrt(cx * cx + cy * cy + 1) * field.frequencies[3] + phase * field.phaseRates[3]
+            ) * field.amplitudes[3];
+            const fieldIndex = Math.min(
+              palette.length - 1,
+              Math.max(0, Math.floor((value + totalAmplitude) / (totalAmplitude * 2) * palette.length))
+            );
+            buffer.pixels[index++] = palette[(fieldIndex + paletteOffset) % palette.length];
           }
         }
-        presentPixelBuffer(context, buffer, width, height, false);
+        presentPixelBuffer(context, buffer, width, height, render.smoothing);
       }
     };
   }
 
   // src/effects/fire.js
-  var STEP_SECONDS = 1 / 60;
-  function createFireRenderer({ canvas, quality }) {
+  var FIRE_DEFAULTS = createEffectDefaults({
+    render: { resolution: 0.25, smoothing: false },
+    motion: { speed: 1 },
+    appearance: {
+      palette: ["#000000", "#ff0000", "#ffff00", "#ffffff"],
+      colorCount: 256,
+      backgroundColor: "#000000"
+    },
+    simulation: {
+      seed: 1993,
+      stepHz: 60,
+      sourceDensity: 0.65,
+      sourceIntensity: 255,
+      sourceVariance: 96,
+      cooling: 2,
+      horizontalDrift: 1,
+      maxCatchUpSteps: 3
+    }
+  });
+  function normalizeFireConfig(input) {
+    return normalizeEffectConfig("fire", input, FIRE_DEFAULTS, (config) => {
+      assertNumber(config.simulation.seed, "fire.simulation.seed", { min: 0, max: 4294967295, integer: true });
+      assertNumber(config.simulation.stepHz, "fire.simulation.stepHz", { min: 1, max: 240 });
+      assertNumber(config.simulation.sourceDensity, "fire.simulation.sourceDensity", { min: 0, max: 1 });
+      assertNumber(config.simulation.sourceIntensity, "fire.simulation.sourceIntensity", { min: 0, max: 255, integer: true });
+      assertNumber(config.simulation.sourceVariance, "fire.simulation.sourceVariance", { min: 0, max: 255, integer: true });
+      assertNumber(config.simulation.cooling, "fire.simulation.cooling", { min: 0, max: 32, integer: true });
+      assertNumber(config.simulation.horizontalDrift, "fire.simulation.horizontalDrift", { min: 0, max: 16, integer: true });
+      assertNumber(config.simulation.maxCatchUpSteps, "fire.simulation.maxCatchUpSteps", { min: 1, max: 20, integer: true });
+    });
+  }
+  function createFireRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
-    const palette = new Uint32Array(256);
-    const scale = quality === "preview" ? 3 : 4;
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    let random = createSeededRandom(config.simulation.seed);
     let heat = new Uint8Array(0);
     let accumulator = 0;
     let width = 1;
     let height = 1;
-    for (let i = 0; i < 256; i++) {
-      let red;
-      let green;
-      let blue;
-      if (i < 64) {
-        red = i * 4;
-        green = 0;
-        blue = 0;
-      } else if (i < 128) {
-        red = 255;
-        green = (i - 64) * 4;
-        blue = 0;
-      } else if (i < 192) {
-        red = 255;
-        green = 255;
-        blue = (i - 128) * 4;
-      } else {
-        red = 255;
-        green = 255;
-        blue = 255;
-      }
-      palette[i] = packRgb(red, green, blue);
-    }
     function spread() {
       const lastRow = buffer.height - 1;
       for (let x = 0; x < buffer.width; x++) {
-        heat[lastRow * buffer.width + x] = Math.random() < 0.65 ? 255 : Math.floor(Math.random() * 96);
+        heat[lastRow * buffer.width + x] = random() < config.simulation.sourceDensity ? config.simulation.sourceIntensity : Math.floor(random() * config.simulation.sourceVariance);
       }
       for (let y = 1; y < buffer.height; y++) {
         const row = y * buffer.width;
         const previousRow = (y - 1) * buffer.width;
         for (let x = 0; x < buffer.width; x++) {
-          const random = Math.random() * 3 | 0;
-          const drift = x + (random & 1) - 1 + (random >> 1 & 1);
-          const targetX = (drift + buffer.width) % buffer.width;
-          heat[previousRow + targetX] = Math.max(0, heat[row + x] - random);
+          const cooling = Math.floor(random() * (config.simulation.cooling + 1));
+          const drift = Math.floor((random() * 2 - 1) * (config.simulation.horizontalDrift + 1));
+          const targetX = (x + drift + buffer.width) % buffer.width;
+          heat[previousRow + targetX] = Math.max(0, heat[row + x] - cooling);
         }
       }
     }
@@ -344,68 +642,125 @@
       resize(nextWidth, nextHeight) {
         width = nextWidth;
         height = nextHeight;
-        resizePixelBuffer(buffer, width / scale, height / scale);
+        resizePixelBuffer(buffer, width * config.render.resolution, height * config.render.resolution);
+        random = createSeededRandom(config.simulation.seed);
         heat = new Uint8Array(buffer.width * buffer.height);
         accumulator = 0;
       },
       render({ delta }) {
-        accumulator += delta;
+        accumulator += delta * config.motion.speed;
+        const stepSeconds = 1 / config.simulation.stepHz;
         let steps = 0;
-        while (accumulator >= STEP_SECONDS && steps < 3) {
+        while (accumulator >= stepSeconds && steps < config.simulation.maxCatchUpSteps) {
           spread();
-          accumulator -= STEP_SECONDS;
+          accumulator -= stepSeconds;
           steps++;
         }
-        for (let i = 0; i < heat.length; i++) buffer.pixels[i] = palette[heat[i]];
-        presentPixelBuffer(context, buffer, width, height, false);
+        for (let i = 0; i < heat.length; i++) {
+          const paletteIndex = Math.round(heat[i] / 255 * (palette.length - 1));
+          buffer.pixels[i] = palette[paletteIndex];
+        }
+        presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
       }
     };
   }
 
   // src/effects/starfield.js
-  var FOV = 256;
-  function createStarfieldRenderer({ canvas, quality }) {
-    const context = getContext2D(canvas, { alpha: false });
-    const count = quality === "preview" ? 30 : 600;
-    const stars = Array.from({ length: count }, () => ({}));
+  var STARFIELD_DEFAULTS = createEffectDefaults({
+    render: { resolution: 1, smoothing: true },
+    motion: { speed: 1 },
+    appearance: {
+      palette: ["#b4c8ff", "#ffffff"],
+      colorCount: 256,
+      backgroundColor: "#000000"
+    },
+    particles: {
+      seed: 1993,
+      particleCount: 600,
+      fov: 256,
+      depth: 256,
+      travelSpeed: 192,
+      centerX: 0.5,
+      centerY: 0.5,
+      trailFade: 0.35,
+      minAlpha: 0.25,
+      maxAlpha: 0.95,
+      minLineWidth: 1,
+      maxLineWidth: 3
+    }
+  });
+  function normalizeStarfieldConfig(input) {
+    return normalizeEffectConfig("starfield", input, STARFIELD_DEFAULTS, (config) => {
+      assertNumber(config.particles.seed, "starfield.particles.seed", { min: 0, max: 4294967295, integer: true });
+      assertNumber(config.particles.particleCount, "starfield.particles.particleCount", { min: 1, max: 1e4, integer: true });
+      for (const key of ["fov", "depth", "travelSpeed"]) {
+        assertNumber(config.particles[key], `starfield.particles.${key}`, { min: Number.MIN_VALUE });
+      }
+      for (const key of ["centerX", "centerY", "trailFade", "minAlpha", "maxAlpha"]) {
+        assertNumber(config.particles[key], `starfield.particles.${key}`, { min: 0, max: 1 });
+      }
+      assertNumber(config.particles.minLineWidth, "starfield.particles.minLineWidth", { min: Number.MIN_VALUE });
+      assertNumber(config.particles.maxLineWidth, "starfield.particles.maxLineWidth", { min: config.particles.minLineWidth });
+      if (config.particles.maxAlpha < config.particles.minAlpha) {
+        throw new RangeError("starfield.particles.maxAlpha must be at least minAlpha.");
+      }
+    });
+  }
+  function createStarfieldRenderer({ canvas, config }) {
+    const output = getContext2D(canvas, { alpha: false });
+    const buffer = createDrawingBuffer();
+    const context = buffer.context;
+    let random = createSeededRandom(config.particles.seed);
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    const stars = Array.from({ length: config.particles.particleCount }, () => ({}));
     let width = 1;
     let height = 1;
-    let centerX = 0.5;
-    let centerY = 0.5;
     function spawn(star, far = false) {
-      star.x = (Math.random() * 2 - 1) * width;
-      star.y = (Math.random() * 2 - 1) * height;
-      star.z = far ? 256 : Math.random() * 255 + 1;
+      star.x = (random() * 2 - 1) * width;
+      star.y = (random() * 2 - 1) * height;
+      star.z = far ? config.particles.depth : random() * (config.particles.depth - 1) + 1;
       star.previousX = null;
       star.previousY = null;
     }
     function resetStars() {
-      for (const star of stars) spawn(star);
+      stars.forEach((star) => spawn(star));
     }
     return {
       resize(nextWidth, nextHeight) {
-        width = nextWidth;
-        height = nextHeight;
-        centerX = width / 2;
-        centerY = height / 2;
+        width = nextWidth * config.render.resolution;
+        height = nextHeight * config.render.resolution;
+        resizeDrawingBuffer(buffer, width, height);
+        random = createSeededRandom(config.particles.seed);
         resetStars();
       },
       render({ delta }) {
-        context.fillStyle = "rgba(0,0,0,0.35)";
+        context.fillStyle = config.appearance.backgroundColor;
+        context.globalAlpha = config.particles.trailFade;
         context.fillRect(0, 0, width, height);
+        context.globalAlpha = 1;
+        const centerX = width * config.particles.centerX;
+        const centerY = height * config.particles.centerY;
         for (const star of stars) {
-          star.z -= 192 * delta;
+          star.z -= config.particles.travelSpeed * config.motion.speed * delta;
           if (star.z <= 1) {
             spawn(star, true);
             continue;
           }
-          const x = star.x / star.z * FOV + centerX;
-          const y = star.y / star.z * FOV + centerY;
+          const x = star.x / star.z * config.particles.fov + centerX;
+          const y = star.y / star.z * config.particles.fov + centerY;
           if (star.previousX !== null) {
-            const depth = 1 - star.z / 256;
-            const speed = depth * depth;
-            context.strokeStyle = `rgba(${180 + speed * 75 | 0},${200 + speed * 55 | 0},255,${0.25 + speed * 0.7})`;
-            context.lineWidth = 1 + speed * 2;
+            const depth = 1 - star.z / config.particles.depth;
+            const intensity = depth * depth;
+            const color = samplePackedPalette(palette, intensity);
+            const red = color & 255;
+            const green = color >>> 8 & 255;
+            const blue = color >>> 16 & 255;
+            const alpha = config.particles.minAlpha + intensity * (config.particles.maxAlpha - config.particles.minAlpha);
+            context.strokeStyle = `rgba(${red},${green},${blue},${alpha})`;
+            context.lineWidth = config.particles.minLineWidth + intensity * (config.particles.maxLineWidth - config.particles.minLineWidth);
             context.beginPath();
             context.moveTo(star.previousX, star.previousY);
             context.lineTo(x, y);
@@ -414,116 +769,186 @@
           star.previousX = x;
           star.previousY = y;
         }
+        presentDrawingBuffer(output, buffer, canvas.width, canvas.height, config.render.smoothing);
       }
     };
   }
 
   // src/effects/metaballs.js
-  var BALLS = Array.from({ length: 5 }, (_, index) => ({
-    amplitudeX: 0.6 + index * 0.13,
-    amplitudeY: 0.8 + index * 0.11,
-    frequencyX: 0.8 + index * 0.27,
-    frequencyY: 1.1 + index * 0.21,
-    phaseX: 0.7 + index * 1.7,
-    phaseY: 1.3 + index * 1.3,
-    strength: 240 + index * 60
-  }));
-  function buildPalette() {
-    const palette = new Uint32Array(512);
-    const stops = [
-      [0, [5, 0, 20]],
-      [0.25, [10, 40, 120]],
-      [0.45, [0, 170, 200]],
-      [0.65, [60, 230, 120]],
-      [0.85, [240, 230, 40]],
-      [1, [255, 255, 255]]
-    ];
-    let segment = 0;
-    for (let i = 0; i < palette.length; i++) {
-      const position = i / (palette.length - 1);
-      while (segment < stops.length - 2 && position > stops[segment + 1][0]) segment++;
-      const left = stops[segment];
-      const right = stops[segment + 1];
-      const mix = (position - left[0]) / (right[0] - left[0] || 1);
-      palette[i] = packRgb(
-        Math.round(left[1][0] + (right[1][0] - left[1][0]) * mix),
-        Math.round(left[1][1] + (right[1][1] - left[1][1]) * mix),
-        Math.round(left[1][2] + (right[1][2] - left[1][2]) * mix)
-      );
+  var POINT_KEYS = /* @__PURE__ */ new Set([
+    "amplitudeX",
+    "amplitudeY",
+    "frequencyX",
+    "frequencyY",
+    "phaseX",
+    "phaseY",
+    "strength"
+  ]);
+  var METABALLS_DEFAULTS = createEffectDefaults({
+    render: { resolution: 1 / 3, smoothing: false },
+    motion: { speed: 1 },
+    appearance: {
+      palette: ["#050014", "#0a2878", "#00aac8", "#3ce678", "#f0e628", "#ffffff"],
+      colorCount: 512,
+      backgroundColor: "#050014"
+    },
+    field: {
+      pointCount: 5,
+      points: null,
+      fieldStrength: 1,
+      threshold: 1,
+      lowScale: 60,
+      highScale: 420
     }
-    return palette;
+  });
+  function generatedPoint(index) {
+    return {
+      amplitudeX: 0.6 + index * 0.13,
+      amplitudeY: 0.8 + index * 0.11,
+      frequencyX: 0.8 + index * 0.27,
+      frequencyY: 1.1 + index * 0.21,
+      phaseX: 0.7 + index * 1.7,
+      phaseY: 1.3 + index * 1.3,
+      strength: 240 + index * 60
+    };
   }
-  function createMetaballsRenderer({ canvas, quality }) {
+  function normalizeMetaballsConfig(input) {
+    if (input?.field?.points !== void 0 && input?.field?.pointCount !== void 0) {
+      throw new RangeError("metaballs.field.pointCount and metaballs.field.points cannot be used together.");
+    }
+    const config = normalizeEffectConfig("metaballs", input, METABALLS_DEFAULTS, (next) => {
+      assertNumber(next.field.pointCount, "metaballs.field.pointCount", { min: 1, max: 64, integer: true });
+      for (const key of ["fieldStrength", "threshold", "lowScale", "highScale"]) {
+        assertNumber(next.field[key], `metaballs.field.${key}`, { min: Number.MIN_VALUE });
+      }
+      if (next.field.points !== null) {
+        if (!Array.isArray(next.field.points) || next.field.points.length < 1 || next.field.points.length > 64) {
+          throw new RangeError("metaballs.field.points must contain between 1 and 64 points.");
+        }
+        next.field.points.forEach((point, index) => {
+          if (point === null || typeof point !== "object" || Array.isArray(point)) {
+            throw new TypeError(`metaballs.field.points[${index}] must be an object.`);
+          }
+          for (const key of Object.keys(point)) {
+            if (!POINT_KEYS.has(key)) throw new RangeError(`Unknown option: metaballs.field.points[${index}].${key}`);
+          }
+          for (const key of POINT_KEYS) {
+            assertNumber(point[key], `metaballs.field.points[${index}].${key}`, {
+              min: key === "strength" ? Number.MIN_VALUE : -Infinity
+            });
+          }
+        });
+        next.field.pointCount = next.field.points.length;
+      }
+    });
+    return config;
+  }
+  function createMetaballsRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
-    const palette = buildPalette();
-    const scale = 3;
-    const balls = BALLS.slice(0, quality === "preview" ? 3 : BALLS.length);
-    const ballX = new Float32Array(balls.length);
-    const ballY = new Float32Array(balls.length);
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    const points = config.field.points ?? Array.from(
+      { length: config.field.pointCount },
+      (_, index) => generatedPoint(index)
+    );
+    const pointX = new Float32Array(points.length);
+    const pointY = new Float32Array(points.length);
     let width = 1;
     let height = 1;
     return {
       resize(nextWidth, nextHeight) {
         width = nextWidth;
         height = nextHeight;
-        resizePixelBuffer(buffer, width / scale, height / scale);
+        resizePixelBuffer(
+          buffer,
+          width * config.render.resolution,
+          height * config.render.resolution
+        );
       },
       render({ time }) {
-        const phase = time * 0.72;
-        for (let i = 0; i < balls.length; i++) {
-          const ball = balls[i];
-          ballX[i] = (Math.sin(phase * ball.frequencyX + ball.phaseX) * ball.amplitudeX + 1) * 0.5 * buffer.width;
-          ballY[i] = (Math.sin(phase * ball.frequencyY + ball.phaseY) * ball.amplitudeY + 1) * 0.5 * buffer.height;
+        const phase = time * 0.72 * config.motion.speed;
+        for (let i = 0; i < points.length; i++) {
+          const point = points[i];
+          pointX[i] = (Math.sin(phase * point.frequencyX + point.phaseX) * point.amplitudeX + 1) * 0.5 * buffer.width;
+          pointY[i] = (Math.sin(phase * point.frequencyY + point.phaseY) * point.amplitudeY + 1) * 0.5 * buffer.height;
         }
         let index = 0;
         for (let y = 0; y < buffer.height; y++) {
           for (let x = 0; x < buffer.width; x++) {
-            let field = 0;
-            for (let i = 0; i < balls.length; i++) {
-              const dx = x - ballX[i];
-              const dy = y - ballY[i];
-              field += balls[i].strength / (dx * dx + dy * dy + 1);
+            let value = 0;
+            for (let i = 0; i < points.length; i++) {
+              const dx = x - pointX[i];
+              const dy = y - pointY[i];
+              value += points[i].strength * config.field.fieldStrength / (dx * dx + dy * dy + 1);
             }
-            let value = field < 1 ? field * 60 : 60 + (field - 1) * 420;
-            value = Math.min(511, value);
-            buffer.pixels[index++] = palette[value | 0];
+            value = value < config.field.threshold ? value * config.field.lowScale : config.field.lowScale + (value - config.field.threshold) * config.field.highScale;
+            const paletteIndex = Math.min(
+              palette.length - 1,
+              Math.max(0, Math.floor(value / 512 * palette.length))
+            );
+            buffer.pixels[index++] = palette[paletteIndex];
           }
         }
-        presentPixelBuffer(context, buffer, width, height, false);
+        presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
       }
     };
   }
 
   // src/effects/tunnel.js
-  function buildPalette2() {
-    const palette = new Uint32Array(256);
-    for (let i = 0; i < palette.length; i++) {
-      palette[i] = packRgb(
-        Math.floor(128 + 127 * Math.sin(0.06 * i)),
-        Math.floor(128 + 127 * Math.sin(0.06 * i + 2)),
-        Math.floor(128 + 127 * Math.sin(0.06 * i + 4))
-      );
+  var TUNNEL_DEFAULTS = createEffectDefaults({
+    render: { resolution: 1 / 3, smoothing: false },
+    motion: { speed: 1, forwardSpeed: 84, rotationSpeed: 1.26, colorCycleSpeed: 63 },
+    appearance: {
+      palette: ["#ff80ee", "#60dfff", "#ffe86b", "#ff80ee"],
+      colorCount: 256,
+      backgroundColor: "#000000"
+    },
+    geometry: {
+      centerX: 0.5,
+      centerY: 0.5,
+      radialFrequency: 60,
+      angularFrequency: 6,
+      fogDistance: 0.5,
+      fogMinimum: 0.15
     }
-    return palette;
+  });
+  function normalizeTunnelConfig(input) {
+    return normalizeEffectConfig("tunnel", input, TUNNEL_DEFAULTS, (config) => {
+      for (const key of ["forwardSpeed", "rotationSpeed", "colorCycleSpeed"]) {
+        assertNumber(config.motion[key], `tunnel.motion.${key}`);
+      }
+      for (const key of ["centerX", "centerY"]) {
+        assertNumber(config.geometry[key], `tunnel.geometry.${key}`);
+      }
+      for (const key of ["radialFrequency", "angularFrequency", "fogDistance"]) {
+        assertNumber(config.geometry[key], `tunnel.geometry.${key}`, { min: Number.MIN_VALUE });
+      }
+      assertNumber(config.geometry.fogMinimum, "tunnel.geometry.fogMinimum", { min: 0, max: 1 });
+    });
   }
-  function createTunnelRenderer({ canvas }) {
+  function createTunnelRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
-    const palette = buildPalette2();
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
     let width = 1;
     let height = 1;
     return {
       resize(nextWidth, nextHeight) {
         width = nextWidth;
         height = nextHeight;
-        resizePixelBuffer(buffer, width / 3, height / 3);
+        resizePixelBuffer(buffer, width * config.render.resolution, height * config.render.resolution);
       },
       render({ time }) {
-        const centerX = buffer.width / 2;
-        const centerY = buffer.height / 2;
-        const shift = time * 84;
-        const angle = time * 1.26;
+        const centerX = buffer.width * config.geometry.centerX;
+        const centerY = buffer.height * config.geometry.centerY;
+        const shift = time * config.motion.speed * config.motion.forwardSpeed;
+        const angle = time * config.motion.speed * config.motion.rotationSpeed;
         let index = 0;
         for (let y = 0; y < buffer.height; y++) {
           for (let x = 0; x < buffer.width; x++) {
@@ -531,220 +956,855 @@
             const dy = y - centerY;
             const distance = Math.max(1e-4, Math.sqrt(dx * dx + dy * dy));
             const polarAngle = Math.atan2(dy, dx) / Math.PI;
-            const textureU = 60 / distance + shift;
-            const textureV = polarAngle * 6 + angle;
+            const textureU = config.geometry.radialFrequency / distance + shift;
+            const textureV = polarAngle * config.geometry.angularFrequency + angle;
             const texture = Math.sin(textureU) * Math.cos(textureV);
-            const fog = Math.min(1, distance / (Math.min(buffer.width, buffer.height) * 0.5));
-            const colorIndex = (texture + 1) * 100 + time * 63 & 255;
-            const fade = 0.15 + fog * 0.85;
-            const color = palette[colorIndex];
+            const fog = Math.min(
+              1,
+              distance / (Math.min(buffer.width, buffer.height) * config.geometry.fogDistance)
+            );
+            const colorPosition = ((texture + 1) * 0.5 + time * config.motion.speed * config.motion.colorCycleSpeed / palette.length) % 1;
+            const color = palette[Math.floor((colorPosition + 1) % 1 * palette.length)];
+            const fade = config.geometry.fogMinimum + fog * (1 - config.geometry.fogMinimum);
             buffer.pixels[index++] = packRgb(
               (color & 255) * fade,
-              (color >> 8 & 255) * fade,
-              (color >> 16 & 255) * fade
+              (color >>> 8 & 255) * fade,
+              (color >>> 16 & 255) * fade
             );
           }
         }
-        presentPixelBuffer(context, buffer, width, height, false);
+        presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
       }
     };
   }
 
-  // src/effects/mandelbrot.js
-  var TARGET_X = -0.7436438870371587;
-  var TARGET_Y = 0.1318259042053119;
-  var MANDELBROT_INTERIOR_COLOR = packRgb(0, 0, 0);
-  function buildPalette3() {
-    return buildSinePalette(new Uint32Array(1024), (index) => index / 1024 * Math.PI * 2);
-  }
-  function mandelbrotZoom(time) {
-    const phase = time / 28 % 1;
+  // src/effects/mandelbrot-core.js
+  function mandelbrotZoom(time, {
+    minZoom,
+    maxZoom,
+    cycleSeconds,
+    startPhase
+  }) {
+    const phase = ((time / cycleSeconds + startPhase) % 1 + 1) % 1;
     const wave = (Math.sin(phase * Math.PI * 2 - Math.PI / 2) + 1) / 2;
     const eased = wave * wave * (3 - 2 * wave);
-    return 10 ** (eased * 6);
-  }
-  function mandelbrotScale(zoom, quality) {
-    if (quality === "preview") return 3;
-    if (zoom < 100) return 3;
-    if (zoom < 1e4) return 5;
-    return 10;
+    const minimumExponent = Math.log10(minZoom);
+    const maximumExponent = Math.log10(maxZoom);
+    return 10 ** (minimumExponent + eased * (maximumExponent - minimumExponent));
   }
   function isMainInterior(real, imaginary) {
     const shifted = real - 0.25;
     const q = shifted * shifted + imaginary * imaginary;
     return q * (q + shifted) <= 0.25 * imaginary * imaginary || (real + 1) * (real + 1) + imaginary * imaginary <= 0.0625;
   }
-  function createMandelbrotRenderer({ canvas, quality }) {
-    const context = getContext2D(canvas, { alpha: false });
-    const buffer = createPixelBuffer();
-    const palette = buildPalette3();
-    let width = 1;
-    let height = 1;
-    let scale = 0;
-    function ensureBuffer(nextScale) {
-      if (scale === nextScale && buffer.image) return;
-      scale = nextScale;
-      resizePixelBuffer(buffer, width / scale, height / scale);
+  function renderMandelbrotPixels({
+    pixels,
+    width,
+    height,
+    time,
+    config,
+    palette,
+    interiorColor
+  }) {
+    const zoom = mandelbrotZoom(time * config.motion.speed, {
+      ...config.camera,
+      ...config.motion
+    });
+    const span = 3 / zoom;
+    const aspect = width / height;
+    const calculatedIterations = Math.floor(
+      config.algorithm.iterationBase + config.algorithm.iterationGrowth * Math.log10(zoom + 1)
+    );
+    const maxIterations = config.algorithm.maxIterations ?? calculatedIterations;
+    const escapeSquared = config.algorithm.escapeRadius ** 2;
+    const log2 = Math.log(2);
+    const realStep = 2 * span / width;
+    const imaginaryStep = 2 * span / aspect / height;
+    const realStart = config.camera.centerX - span;
+    const imaginaryStart = config.camera.centerY - span / aspect;
+    const checkMainInterior = zoom < 100;
+    let index = 0;
+    for (let y = 0; y < height; y++) {
+      const imaginary = imaginaryStart + y * imaginaryStep;
+      for (let x = 0; x < width; x++) {
+        const real = realStart + x * realStep;
+        if (checkMainInterior && isMainInterior(real, imaginary)) {
+          pixels[index++] = interiorColor;
+          continue;
+        }
+        let zReal = 0;
+        let zImaginary = 0;
+        let zRealSquared = 0;
+        let zImaginarySquared = 0;
+        let iteration = 0;
+        while (zRealSquared + zImaginarySquared < escapeSquared && iteration < maxIterations) {
+          zImaginary = 2 * zReal * zImaginary + imaginary;
+          zReal = zRealSquared - zImaginarySquared + real;
+          zRealSquared = zReal * zReal;
+          zImaginarySquared = zImaginary * zImaginary;
+          iteration++;
+        }
+        if (iteration === maxIterations) {
+          pixels[index++] = interiorColor;
+          continue;
+        }
+        const logZn = Math.log(zRealSquared + zImaginarySquared) / 2;
+        const nu = Math.log(logZn / log2) / log2;
+        const smooth = iteration + 1 - nu;
+        pixels[index++] = palette[Math.abs(Math.floor(smooth * 8)) % palette.length];
+      }
     }
+    return { zoom, maxIterations };
+  }
+
+  // src/effects/mandelbrot-webgl.js
+  var VERTEX_SHADER = `#version 300 es
+const vec2 POSITIONS[3] = vec2[3](
+  vec2(-1.0, -1.0),
+  vec2(3.0, -1.0),
+  vec2(-1.0, 3.0)
+);
+
+void main() {
+  gl_Position = vec4(POSITIONS[gl_VertexID], 0.0, 1.0);
+}`;
+  var FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+precision highp int;
+
+uniform vec2 uResolution;
+uniform vec2 uCenter;
+uniform float uSpan;
+uniform float uEscapeSquared;
+uniform float uZoom;
+uniform int uMaxIterations;
+uniform int uUsePerturbation;
+uniform sampler2D uReferenceOrbit;
+uniform int uReferenceWidth;
+uniform sampler2D uPalette;
+uniform int uPaletteWidth;
+uniform int uPaletteSize;
+uniform vec4 uInteriorColor;
+
+out vec4 fragmentColor;
+
+vec2 complexSquare(vec2 value) {
+  return vec2(
+    value.x * value.x - value.y * value.y,
+    2.0 * value.x * value.y
+  );
+}
+
+vec2 complexMultiply(vec2 left, vec2 right) {
+  return vec2(
+    left.x * right.x - left.y * right.y,
+    left.x * right.y + left.y * right.x
+  );
+}
+
+vec4 referenceValue(int index) {
+  return texelFetch(
+    uReferenceOrbit,
+    ivec2(index % uReferenceWidth, index / uReferenceWidth),
+    0
+  );
+}
+
+vec4 paletteValue(int index) {
+  return texelFetch(
+    uPalette,
+    ivec2(index % uPaletteWidth, index / uPaletteWidth),
+    0
+  );
+}
+
+bool isMainInterior(vec2 point) {
+  float shifted = point.x - 0.25;
+  float q = shifted * shifted + point.y * point.y;
+  return q * (q + shifted) <= 0.25 * point.y * point.y
+    || (point.x + 1.0) * (point.x + 1.0) + point.y * point.y <= 0.0625;
+}
+
+void main() {
+  float pixelX = gl_FragCoord.x - 0.5;
+  float pixelY = uResolution.y - gl_FragCoord.y - 0.5;
+  float aspect = uResolution.x / uResolution.y;
+  vec2 deltaC = vec2(
+    -uSpan + 2.0 * uSpan * pixelX / uResolution.x,
+    -uSpan / aspect + 2.0 * uSpan * pixelY / (aspect * uResolution.y)
+  );
+  vec2 point = uCenter + deltaC;
+
+  if (uZoom < 100.0 && isMainInterior(point)) {
+    fragmentColor = uInteriorColor;
+    return;
+  }
+
+  vec2 z = vec2(0.0);
+  vec2 deltaZ = vec2(0.0);
+  int iteration = 0;
+  bool escaped = false;
+
+  for (int index = 0; index < uMaxIterations; index++) {
+    if (uUsePerturbation == 1) {
+      vec4 packedReference = referenceValue(index);
+      vec4 packedNext = referenceValue(index + 1);
+      vec2 referenceHigh = packedReference.rg;
+      vec2 referenceLow = packedReference.ba;
+      deltaZ = complexSquare(deltaZ)
+        + 2.0 * complexMultiply(referenceHigh, deltaZ)
+        + 2.0 * complexMultiply(referenceLow, deltaZ)
+        + deltaC;
+      z = packedNext.rg + (packedNext.ba + deltaZ);
+    } else {
+      z = complexSquare(z) + point;
+    }
+
+    iteration = index + 1;
+    if (dot(z, z) >= uEscapeSquared) {
+      escaped = true;
+      break;
+    }
+  }
+
+  if (!escaped) {
+    fragmentColor = uInteriorColor;
+    return;
+  }
+
+  const float LOG_TWO = 0.6931471805599453;
+  float logZn = log(dot(z, z)) * 0.5;
+  float nu = log(logZn / LOG_TWO) / LOG_TWO;
+  float smoothValue = float(iteration) + 1.0 - nu;
+  int paletteIndex = int(abs(floor(smoothValue * 8.0))) % uPaletteSize;
+  fragmentColor = paletteValue(paletteIndex);
+}`;
+  function compileShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    if (!shader) throw new Error("Unable to create Mandelbrot WebGL2 shader.");
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      const message = gl.getShaderInfoLog(shader) || "Unknown shader compilation error.";
+      gl.deleteShader(shader);
+      throw new Error(`Mandelbrot WebGL2 shader failed: ${message}`);
+    }
+    return shader;
+  }
+  function createProgram(gl) {
+    const vertex = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
+    const fragment = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
+    const program = gl.createProgram();
+    if (!program) throw new Error("Unable to create Mandelbrot WebGL2 program.");
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, fragment);
+    gl.linkProgram(program);
+    gl.deleteShader(vertex);
+    gl.deleteShader(fragment);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      const message = gl.getProgramInfoLog(program) || "Unknown program link error.";
+      gl.deleteProgram(program);
+      throw new Error(`Mandelbrot WebGL2 program failed: ${message}`);
+    }
+    return program;
+  }
+  function isWebGL2Context(context) {
+    return Boolean(context && typeof context.createShader === "function" && typeof context.drawArrays === "function" && typeof context.texImage2D === "function");
+  }
+  function probeMandelbrotWebGL2() {
+    const canvas = globalThis.document?.createElement?.("canvas");
+    const gl = canvas?.getContext?.("webgl2", {
+      alpha: false,
+      antialias: false,
+      depth: false,
+      preserveDrawingBuffer: false
+    });
+    if (!isWebGL2Context(gl)) return false;
+    try {
+      const program = createProgram(gl);
+      gl.deleteProgram(program);
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      return true;
+    } catch {
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      return false;
+    }
+  }
+  function textureShape(gl, length) {
+    const maximumWidth = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    const width = Math.min(maximumWidth, length);
+    return { width, height: Math.ceil(length / width) };
+  }
+  function createTexture(gl, unit) {
+    const texture = gl.createTexture();
+    if (!texture) throw new Error("Unable to create Mandelbrot WebGL2 texture.");
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return texture;
+  }
+  function fillReferenceOrbit(target, maximumIterations, centerX, centerY) {
+    let real = 0;
+    let imaginary = 0;
+    let valid = true;
+    function store(index) {
+      const offset = index * 4;
+      const highReal = Math.fround(real);
+      const highImaginary = Math.fround(imaginary);
+      target[offset] = highReal;
+      target[offset + 1] = highImaginary;
+      target[offset + 2] = real - highReal;
+      target[offset + 3] = imaginary - highImaginary;
+    }
+    store(0);
+    for (let index = 0; index < maximumIterations; index++) {
+      const nextImaginary = 2 * real * imaginary + centerY;
+      const nextReal = real * real - imaginary * imaginary + centerX;
+      real = nextReal;
+      imaginary = nextImaginary;
+      if (!Number.isFinite(real) || !Number.isFinite(imaginary)) valid = false;
+      store(index + 1);
+    }
+    return valid;
+  }
+  function uploadPalette(gl, texture, palette, shape) {
+    const bytes = new Uint8Array(shape.width * shape.height * 4);
+    for (let index = 0; index < palette.length; index++) {
+      const packed = palette[index] >>> 0;
+      const offset = index * 4;
+      bytes[offset] = packed & 255;
+      bytes[offset + 1] = packed >>> 8 & 255;
+      bytes[offset + 2] = packed >>> 16 & 255;
+      bytes[offset + 3] = 255;
+    }
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA8,
+      shape.width,
+      shape.height,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      bytes
+    );
+  }
+  function colorChannels(packed) {
+    const color = packed >>> 0;
+    return [
+      (color & 255) / 255,
+      (color >>> 8 & 255) / 255,
+      (color >>> 16 & 255) / 255,
+      1
+    ];
+  }
+  function createMandelbrotWebGLRenderer({ canvas, config }) {
+    const gl = canvas.getContext("webgl2", {
+      alpha: false,
+      antialias: false,
+      depth: false,
+      // renderOnce() must remain visible after the compositor has consumed the
+      // frame (notably for reduced-motion and static proof captures).
+      preserveDrawingBuffer: true,
+      powerPreference: "high-performance"
+    });
+    if (!isWebGL2Context(gl)) throw new Error("WebGL2 is not available.");
+    let program = null;
+    let referenceTexture = null;
+    let paletteTexture = null;
+    let referenceShape = null;
+    let referencePixels = null;
+    let referenceOrbitValid = false;
+    let width = 2;
+    let height = 2;
+    let contextLost = false;
+    let wakeScheduler = null;
+    const previousImageRendering = canvas.style?.imageRendering;
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    const paletteShape = textureShape(gl, palette.length);
+    const interiorColor = colorChannels(packHexColor(config.appearance.interiorColor));
+    const maximumIterations = config.algorithm.maxIterations ?? Math.floor(
+      config.algorithm.iterationBase + config.algorithm.iterationGrowth * Math.log10(config.camera.maxZoom + 1)
+    );
+    function uniforms() {
+      const names = [
+        "uResolution",
+        "uCenter",
+        "uSpan",
+        "uEscapeSquared",
+        "uZoom",
+        "uMaxIterations",
+        "uUsePerturbation",
+        "uReferenceOrbit",
+        "uReferenceWidth",
+        "uPalette",
+        "uPaletteWidth",
+        "uPaletteSize",
+        "uInteriorColor"
+      ];
+      return Object.fromEntries(names.map((name) => [name, gl.getUniformLocation(program, name)]));
+    }
+    let locations = null;
+    function initialize() {
+      program = createProgram(gl);
+      locations = uniforms();
+      referenceTexture = createTexture(gl, 0);
+      paletteTexture = createTexture(gl, 1);
+      referenceShape = textureShape(gl, maximumIterations + 1);
+      referencePixels = new Float32Array(referenceShape.width * referenceShape.height * 4);
+      referenceOrbitValid = fillReferenceOrbit(
+        referencePixels,
+        maximumIterations,
+        config.camera.centerX,
+        config.camera.centerY
+      );
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, referenceTexture);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA32F,
+        referenceShape.width,
+        referenceShape.height,
+        0,
+        gl.RGBA,
+        gl.FLOAT,
+        referencePixels
+      );
+      uploadPalette(gl, paletteTexture, palette, paletteShape);
+      gl.disable(gl.BLEND);
+      gl.disable(gl.DEPTH_TEST);
+    }
+    function disposeResources() {
+      if (referenceTexture) gl.deleteTexture(referenceTexture);
+      if (paletteTexture) gl.deleteTexture(paletteTexture);
+      if (program) gl.deleteProgram(program);
+      referenceTexture = null;
+      paletteTexture = null;
+      program = null;
+      locations = null;
+    }
+    function onContextLost(event) {
+      event.preventDefault?.();
+      contextLost = true;
+    }
+    function onContextRestored() {
+      contextLost = false;
+      disposeResources();
+      initialize();
+      wakeScheduler?.();
+    }
+    canvas.addEventListener?.("webglcontextlost", onContextLost);
+    canvas.addEventListener?.("webglcontextrestored", onContextRestored);
+    initialize();
+    if (canvas.style) canvas.style.imageRendering = config.render.smoothing ? "auto" : "pixelated";
     return {
       resize(nextWidth, nextHeight) {
-        width = nextWidth;
-        height = nextHeight;
-        scale = 0;
+        width = Math.max(2, Math.floor(nextWidth * config.render.resolution));
+        height = Math.max(2, Math.floor(nextHeight * config.render.resolution));
+        if (canvas.width !== width) canvas.width = width;
+        if (canvas.height !== height) canvas.height = height;
+        gl.viewport(0, 0, width, height);
       },
       render({ time }) {
-        const zoom = mandelbrotZoom(time);
-        ensureBuffer(mandelbrotScale(zoom, quality));
-        const span = 3 / zoom;
-        const aspect = buffer.width / buffer.height;
-        const calculatedIterations = Math.floor(80 + 60 * Math.log10(zoom + 1));
-        const maxIterations = quality === "preview" ? Math.min(64, calculatedIterations) : calculatedIterations;
-        const log2 = Math.log(2);
-        let index = 0;
-        for (let y = 0; y < buffer.height; y++) {
-          const imaginary = TARGET_Y + (y / buffer.height - 0.5) * 2 * span / aspect;
-          for (let x = 0; x < buffer.width; x++) {
-            const real = TARGET_X + (x / buffer.width - 0.5) * 2 * span;
-            if (isMainInterior(real, imaginary)) {
-              buffer.pixels[index++] = MANDELBROT_INTERIOR_COLOR;
-              continue;
-            }
-            let zReal = 0;
-            let zImaginary = 0;
-            let zRealSquared = 0;
-            let zImaginarySquared = 0;
-            let iteration = 0;
-            while (zRealSquared + zImaginarySquared < 256 && iteration < maxIterations) {
-              zImaginary = 2 * zReal * zImaginary + imaginary;
-              zReal = zRealSquared - zImaginarySquared + real;
-              zRealSquared = zReal * zReal;
-              zImaginarySquared = zImaginary * zImaginary;
-              iteration++;
-            }
-            if (iteration === maxIterations) {
-              buffer.pixels[index++] = MANDELBROT_INTERIOR_COLOR;
-              continue;
-            }
-            const logZn = Math.log(zRealSquared + zImaginarySquared) / 2;
-            const nu = Math.log(logZn / log2) / log2;
-            const smooth = iteration + 1 - nu;
-            buffer.pixels[index++] = palette[smooth * 8 & 1023];
-          }
-        }
-        presentPixelBuffer(context, buffer, width, height, false);
+        if (contextLost || !program) return;
+        const zoom = mandelbrotZoom(time * config.motion.speed, {
+          ...config.camera,
+          ...config.motion
+        });
+        const calculatedIterations = Math.floor(
+          config.algorithm.iterationBase + config.algorithm.iterationGrowth * Math.log10(zoom + 1)
+        );
+        const frameIterations = config.algorithm.maxIterations ?? calculatedIterations;
+        const usePerturbation = zoom >= 1e3 && referenceOrbitValid;
+        gl.useProgram(program);
+        gl.viewport(0, 0, width, height);
+        gl.uniform2f(locations.uResolution, width, height);
+        gl.uniform2f(locations.uCenter, config.camera.centerX, config.camera.centerY);
+        gl.uniform1f(locations.uSpan, 3 / zoom);
+        gl.uniform1f(locations.uEscapeSquared, config.algorithm.escapeRadius ** 2);
+        gl.uniform1f(locations.uZoom, zoom);
+        gl.uniform1i(locations.uMaxIterations, frameIterations);
+        gl.uniform1i(locations.uUsePerturbation, usePerturbation ? 1 : 0);
+        gl.uniform1i(locations.uReferenceOrbit, 0);
+        gl.uniform1i(locations.uReferenceWidth, referenceShape.width);
+        gl.uniform1i(locations.uPalette, 1);
+        gl.uniform1i(locations.uPaletteWidth, paletteShape.width);
+        gl.uniform1i(locations.uPaletteSize, palette.length);
+        gl.uniform4f(locations.uInteriorColor, ...interiorColor);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      },
+      getStats() {
+        return { backend: "webgl2" };
+      },
+      isAvailable() {
+        return !contextLost;
+      },
+      setWake(callback) {
+        wakeScheduler = callback;
+      },
+      destroy() {
+        canvas.removeEventListener?.("webglcontextlost", onContextLost);
+        canvas.removeEventListener?.("webglcontextrestored", onContextRestored);
+        if (canvas.style) canvas.style.imageRendering = previousImageRendering;
+        wakeScheduler = null;
+        disposeResources();
       }
     };
   }
 
-  // src/effects/sine-scroller.js
-  var TEXT = "  GREETZ TO ALL DEMOSCENERS  ***  PLASMA  FIRE  METABALLS  TUNNEL  FRACTALS  ROTOZOOM  FEEDBACK  COPPER BARS  ***  JS DEMO PACK 2026  ***  KEEP IT REAL  ***  ";
-  function createSineScrollerRenderer({ canvas, quality }) {
+  // src/effects/mandelbrot.js
+  var MANDELBROT_INTERIOR_COLOR = packRgb(0, 0, 0);
+  var MANDELBROT_DEFAULTS = createEffectDefaults({
+    render: { backend: "canvas2d", resolution: 0.2, smoothing: false },
+    motion: { speed: 1, cycleSeconds: 28, startPhase: 0 },
+    appearance: {
+      palette: [
+        "#80ed12",
+        "#bfbf01",
+        "#ed8012",
+        "#ff4040",
+        "#ed127f",
+        "#bf01bf",
+        "#8012ed",
+        "#4040ff",
+        "#127fed",
+        "#01bfbf",
+        "#12ed80",
+        "#40ff40",
+        "#7fed12"
+      ],
+      colorCount: 1024,
+      backgroundColor: "#000000",
+      interiorColor: "#000000"
+    },
+    camera: {
+      centerX: -0.7436438870371587,
+      centerY: 0.1318259042053119,
+      minZoom: 1,
+      maxZoom: 1e6
+    },
+    algorithm: {
+      iterationBase: 80,
+      iterationGrowth: 60,
+      maxIterations: null,
+      escapeRadius: 16
+    }
+  });
+  function normalizeMandelbrotConfig(input) {
+    return normalizeEffectConfig("mandelbrot", input, MANDELBROT_DEFAULTS, (config) => {
+      assertString(config.render.backend, "mandelbrot.render.backend");
+      if (!["auto", "webgl2", "canvas2d"].includes(config.render.backend)) {
+        throw new RangeError("mandelbrot.render.backend must be auto, webgl2 or canvas2d.");
+      }
+      assertNumber(config.motion.cycleSeconds, "mandelbrot.motion.cycleSeconds", { min: Number.MIN_VALUE });
+      assertNumber(config.motion.startPhase, "mandelbrot.motion.startPhase", { min: 0, max: 1 });
+      for (const key of ["centerX", "centerY"]) {
+        assertNumber(config.camera[key], `mandelbrot.camera.${key}`);
+      }
+      assertNumber(config.camera.minZoom, "mandelbrot.camera.minZoom", { min: Number.MIN_VALUE });
+      assertNumber(config.camera.maxZoom, "mandelbrot.camera.maxZoom", {
+        min: config.camera.minZoom + Number.EPSILON
+      });
+      assertNumber(config.algorithm.iterationBase, "mandelbrot.algorithm.iterationBase", { min: 1 });
+      assertNumber(config.algorithm.iterationGrowth, "mandelbrot.algorithm.iterationGrowth", { min: 0 });
+      if (config.algorithm.maxIterations !== null) {
+        assertNumber(config.algorithm.maxIterations, "mandelbrot.algorithm.maxIterations", {
+          min: 1,
+          max: 1e4,
+          integer: true
+        });
+      }
+      assertNumber(config.algorithm.escapeRadius, "mandelbrot.algorithm.escapeRadius", { min: 2 });
+    });
+  }
+  function createMandelbrotCanvas2DRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
-    const starCount = quality === "preview" ? 40 : 220;
-    const stars = Array.from({ length: starCount }, () => ({}));
+    const buffer = createPixelBuffer();
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    const interiorColor = packHexColor(config.appearance.interiorColor);
     let width = 1;
     let height = 1;
-    function resetStars() {
-      for (const star of stars) {
-        star.x = Math.random() * width;
-        star.y = Math.random() * height;
-        star.z = Math.random() * 2 + 0.2;
-        star.size = Math.random() * 1.6 + 0.3;
-      }
-    }
     return {
       resize(nextWidth, nextHeight) {
         width = nextWidth;
         height = nextHeight;
+        resizePixelBuffer(
+          buffer,
+          width * config.render.resolution,
+          height * config.render.resolution
+        );
+      },
+      render({ time }) {
+        renderMandelbrotPixels({
+          pixels: buffer.pixels,
+          width: buffer.width,
+          height: buffer.height,
+          time,
+          config,
+          palette,
+          interiorColor
+        });
+        presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
+      },
+      getStats() {
+        return { backend: "canvas2d" };
+      }
+    };
+  }
+  function createMandelbrotRenderer({ canvas, config }) {
+    if (config.render.backend !== "canvas2d" && probeMandelbrotWebGL2()) {
+      try {
+        return createMandelbrotWebGLRenderer({ canvas, config });
+      } catch (error) {
+        globalThis.console?.warn?.("Mandelbrot WebGL2 unavailable; using Canvas 2D.", error);
+      }
+    }
+    return createMandelbrotCanvas2DRenderer({ canvas, config });
+  }
+
+  // src/effects/sine-scroller.js
+  var DEFAULT_TEXT = "  GREETZ TO ALL DEMOSCENERS  ***  PLASMA  FIRE  METABALLS  TUNNEL  FRACTALS  ROTOZOOM  FEEDBACK  COPPER BARS  ***  JS DEMO PACK 2026  ***  KEEP IT REAL  ***  ";
+  var SINE_SCROLLER_DEFAULTS = createEffectDefaults({
+    render: { resolution: 1, smoothing: true },
+    motion: { speed: 1, scrollSpeed: 132, phaseSpeed: 3, colorCycleSpeed: 0.33 },
+    appearance: {
+      palette: ["#78a0ff", "#70f0ff", "#f080ff", "#ffe66d", "#78a0ff"],
+      colorCount: 360,
+      backgroundColor: "#04040a",
+      shadowColor: "#000000",
+      shadowAlpha: 0.6,
+      starColor: "#78a0ff"
+    },
+    text: {
+      content: DEFAULT_TEXT,
+      fontFamily: "Courier New, monospace",
+      fontWeight: 900,
+      fontSizeRatio: 0.13,
+      maxFontSize: 72,
+      characterWidthRatio: 0.62,
+      shadowOffsetX: 4,
+      shadowOffsetY: 4
+    },
+    wave: { baseline: 0.62, amplitude: 0.12, frequency: 0.018 },
+    stars: {
+      seed: 1993,
+      count: 220,
+      speed: 36,
+      minDepth: 0.2,
+      maxDepth: 2.2,
+      minSize: 0.3,
+      maxSize: 1.9,
+      minAlpha: 0.3,
+      maxAlpha: 1
+    }
+  });
+  function normalizeSineScrollerConfig(input) {
+    return normalizeEffectConfig("sineScroller", input, SINE_SCROLLER_DEFAULTS, (config) => {
+      for (const key of ["content", "fontFamily"]) assertString(config.text[key], `sineScroller.text.${key}`);
+      assertNumber(config.text.fontWeight, "sineScroller.text.fontWeight", { min: 100, max: 1e3, integer: true });
+      for (const key of ["fontSizeRatio", "maxFontSize", "characterWidthRatio"]) {
+        assertNumber(config.text[key], `sineScroller.text.${key}`, { min: Number.MIN_VALUE });
+      }
+      for (const key of ["shadowOffsetX", "shadowOffsetY"]) assertNumber(config.text[key], `sineScroller.text.${key}`);
+      assertNumber(config.wave.baseline, "sineScroller.wave.baseline", { min: 0, max: 1 });
+      assertNumber(config.wave.amplitude, "sineScroller.wave.amplitude", { min: 0, max: 1 });
+      assertNumber(config.wave.frequency, "sineScroller.wave.frequency", { min: Number.MIN_VALUE });
+      for (const key of ["scrollSpeed", "phaseSpeed", "colorCycleSpeed"]) {
+        assertNumber(config.motion[key], `sineScroller.motion.${key}`);
+      }
+      assertNumber(config.appearance.shadowAlpha, "sineScroller.appearance.shadowAlpha", { min: 0, max: 1 });
+      assertString(config.appearance.shadowColor, "sineScroller.appearance.shadowColor");
+      assertString(config.appearance.starColor, "sineScroller.appearance.starColor");
+      assertNumber(config.stars.seed, "sineScroller.stars.seed", { min: 0, max: 4294967295, integer: true });
+      assertNumber(config.stars.count, "sineScroller.stars.count", { min: 0, max: 5e3, integer: true });
+      for (const key of ["speed", "minDepth", "maxDepth", "minSize", "maxSize", "minAlpha", "maxAlpha"]) {
+        assertNumber(config.stars[key], `sineScroller.stars.${key}`, { min: 0 });
+      }
+      for (const [minimum, maximum] of [["minDepth", "maxDepth"], ["minSize", "maxSize"], ["minAlpha", "maxAlpha"]]) {
+        if (config.stars[maximum] < config.stars[minimum]) {
+          throw new RangeError(`sineScroller.stars.${maximum} must be at least ${minimum}.`);
+        }
+      }
+      if (config.stars.maxAlpha > 1) throw new RangeError("sineScroller.stars.maxAlpha must be at most 1.");
+    });
+  }
+  function createSineScrollerRenderer({ canvas, config }) {
+    const output = getContext2D(canvas, { alpha: false });
+    const buffer = createDrawingBuffer();
+    const context = buffer.context;
+    let random = createSeededRandom(config.stars.seed);
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    const stars = Array.from({ length: config.stars.count }, () => ({}));
+    let width = 1;
+    let height = 1;
+    function resetStars() {
+      for (const star of stars) {
+        star.x = random() * width;
+        star.y = random() * height;
+        star.z = config.stars.minDepth + random() * (config.stars.maxDepth - config.stars.minDepth);
+        star.size = config.stars.minSize + random() * (config.stars.maxSize - config.stars.minSize);
+      }
+    }
+    return {
+      resize(nextWidth, nextHeight) {
+        width = nextWidth * config.render.resolution;
+        height = nextHeight * config.render.resolution;
+        resizeDrawingBuffer(buffer, width, height);
+        random = createSeededRandom(config.stars.seed);
         resetStars();
       },
       render({ time, delta }) {
-        context.fillStyle = "#04040a";
+        context.fillStyle = config.appearance.backgroundColor;
         context.fillRect(0, 0, width, height);
         for (const star of stars) {
-          star.x -= star.z * 36 * delta;
+          star.x -= star.z * config.stars.speed * config.motion.speed * delta;
           if (star.x < 0) {
             star.x = width;
-            star.y = Math.random() * height;
+            star.y = random() * height;
           }
-          const alpha = 0.3 + star.z / 2.2 * 0.7;
-          context.fillStyle = `rgba(120,160,255,${alpha})`;
+          const depthRange = Math.max(Number.EPSILON, config.stars.maxDepth - config.stars.minDepth);
+          const normalized = (star.z - config.stars.minDepth) / depthRange;
+          const alpha = config.stars.minAlpha + normalized * (config.stars.maxAlpha - config.stars.minAlpha);
+          context.globalAlpha = alpha;
+          context.fillStyle = config.appearance.starColor;
           context.fillRect(star.x, star.y, star.size, star.size);
         }
-        const fontSize = Math.min(72, height * 0.13);
-        context.font = `900 ${fontSize}px 'Courier New', monospace`;
+        context.globalAlpha = 1;
+        const fontSize = Math.min(config.text.maxFontSize, height * config.text.fontSizeRatio);
+        context.font = `${config.text.fontWeight} ${fontSize}px ${config.text.fontFamily}`;
         context.textBaseline = "middle";
         context.textAlign = "left";
-        const baseline = height * 0.62;
-        const amplitude = height * 0.12;
-        const frequency = 0.018;
-        const characterWidth = fontSize * 0.62;
-        const totalWidth = TEXT.length * characterWidth;
-        const offset = time * 132 % totalWidth;
+        const baseline = height * config.wave.baseline;
+        const amplitude = height * config.wave.amplitude;
+        const characterWidth = fontSize * config.text.characterWidthRatio;
+        const totalWidth = config.text.content.length * characterWidth;
+        const scaledTime = time * config.motion.speed;
+        const offset = scaledTime * config.motion.scrollSpeed % totalWidth;
         const passes = Math.ceil((width + offset) / totalWidth) + 1;
-        const phase = time * 3;
+        const phase = scaledTime * config.motion.phaseSpeed;
         for (let pass = 0; pass < passes; pass++) {
           const startX = -offset + pass * totalWidth;
-          for (let index = 0; index < TEXT.length; index++) {
+          for (let index = 0; index < config.text.content.length; index++) {
             const x = startX + index * characterWidth + characterWidth / 2;
             if (x < -characterWidth || x > width + characterWidth) continue;
-            const y = baseline + Math.sin(x * frequency + phase) * amplitude;
-            const hue = (index * 18 + time * 120) % 360;
-            context.fillStyle = "rgba(0,0,0,0.6)";
-            context.fillText(TEXT[index], x - fontSize * 0.5 + 4, y + 4);
-            context.fillStyle = `hsl(${hue},100%,${62 + Math.sin(x * frequency * 2 + phase) * 12}%)`;
-            context.fillText(TEXT[index], x - fontSize * 0.5, y);
+            const y = baseline + Math.sin(x * config.wave.frequency + phase) * amplitude;
+            context.globalAlpha = config.appearance.shadowAlpha;
+            context.fillStyle = config.appearance.shadowColor;
+            context.fillText(
+              config.text.content[index],
+              x - fontSize * 0.5 + config.text.shadowOffsetX,
+              y + config.text.shadowOffsetY
+            );
+            const color = samplePackedPalette(
+              palette,
+              (index / config.text.content.length + scaledTime * config.motion.colorCycleSpeed) % 1
+            );
+            context.globalAlpha = 1;
+            context.fillStyle = `rgb(${color & 255},${color >>> 8 & 255},${color >>> 16 & 255})`;
+            context.fillText(config.text.content[index], x - fontSize * 0.5, y);
           }
         }
+        presentDrawingBuffer(output, buffer, canvas.width, canvas.height, config.render.smoothing);
       }
     };
   }
 
   // src/effects/rotozoom.js
-  var TEXTURE_SIZE = 256;
-  function buildTexture() {
-    const texture = new Uint32Array(TEXTURE_SIZE * TEXTURE_SIZE);
-    for (let y = 0; y < TEXTURE_SIZE; y++) {
-      for (let x = 0; x < TEXTURE_SIZE; x++) {
-        const checker = ((x >> 5) + (y >> 5) & 1) === 0;
-        const centerX = x - TEXTURE_SIZE / 2;
-        const centerY = y - TEXTURE_SIZE / 2;
+  var ROTOZOOM_DEFAULTS = createEffectDefaults({
+    render: { resolution: 0.5, smoothing: true },
+    motion: {
+      speed: 1,
+      rotationSpeed: 0.8,
+      zoomBase: 1.2,
+      zoomAmplitude: 0.7,
+      zoomSpeed: 0.5
+    },
+    appearance: {
+      palette: ["#141e28", "#284d68", "#d47832", "#f0b050", "#00f0c8", "#000000"],
+      colorCount: 256,
+      backgroundColor: "#000000"
+    },
+    texture: {
+      size: 256,
+      checkerSize: 32,
+      ringFrequency: 0.12,
+      spokeCount: 8,
+      centerRadius: 26,
+      borderRadius: 30
+    }
+  });
+  function normalizeRotozoomConfig(input) {
+    return normalizeEffectConfig("rotozoom", input, ROTOZOOM_DEFAULTS, (config) => {
+      for (const key of ["rotationSpeed", "zoomAmplitude", "zoomSpeed"]) {
+        assertNumber(config.motion[key], `rotozoom.motion.${key}`);
+      }
+      assertNumber(config.motion.zoomBase, "rotozoom.motion.zoomBase", { min: Number.MIN_VALUE });
+      assertNumber(config.texture.size, "rotozoom.texture.size", { min: 16, max: 1024, integer: true });
+      assertNumber(config.texture.checkerSize, "rotozoom.texture.checkerSize", { min: 1, max: 512, integer: true });
+      assertNumber(config.texture.ringFrequency, "rotozoom.texture.ringFrequency", { min: 0 });
+      assertNumber(config.texture.spokeCount, "rotozoom.texture.spokeCount", { min: 1, max: 64, integer: true });
+      assertNumber(config.texture.centerRadius, "rotozoom.texture.centerRadius", { min: 0 });
+      assertNumber(config.texture.borderRadius, "rotozoom.texture.borderRadius", { min: config.texture.centerRadius });
+    });
+  }
+  function buildTexture(config, palette) {
+    const size = config.texture.size;
+    const texture = new Uint32Array(size * size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const checker = (Math.floor(x / config.texture.checkerSize) + Math.floor(y / config.texture.checkerSize) & 1) === 0;
+        const centerX = x - size / 2;
+        const centerY = y - size / 2;
         const radius = Math.sqrt(centerX * centerX + centerY * centerY);
-        const rings = Math.sin(radius * 0.12) * 0.5 + 0.5;
-        const spokes = Math.sin(Math.atan2(centerY, centerX) * 8) * 0.5 + 0.5;
-        let red = checker ? 20 + rings * 60 : 200 * spokes + 40;
-        let green = checker ? 30 + rings * 90 : 120 * spokes + 20;
-        let blue = checker ? 40 + rings * 120 : 30 * spokes + 10;
-        if (radius < 26) {
-          red = 0;
-          green = 240;
-          blue = 200;
-        } else if (radius < 30) {
-          red = 0;
-          green = 0;
-          blue = 0;
-        }
-        texture[y * TEXTURE_SIZE + x] = packRgb(red, green, blue);
+        const rings = Math.sin(radius * config.texture.ringFrequency) * 0.5 + 0.5;
+        const spokes = Math.sin(Math.atan2(centerY, centerX) * config.texture.spokeCount) * 0.5 + 0.5;
+        let position = checker ? rings * 0.4 : 0.4 + spokes * 0.4;
+        if (radius < config.texture.centerRadius) position = 0.85;
+        else if (radius < config.texture.borderRadius) position = 1;
+        texture[y * size + x] = samplePackedPalette(palette, position);
       }
     }
     return texture;
   }
-  function createRotozoomRenderer({ canvas, quality }) {
+  function createRotozoomRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
-    const texture = buildTexture();
-    const scale = quality === "preview" ? 3 : 2;
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    const texture = buildTexture(config, palette);
+    const textureSize = config.texture.size;
     let width = 1;
     let height = 1;
     return {
       resize(nextWidth, nextHeight) {
         width = nextWidth;
         height = nextHeight;
-        resizePixelBuffer(buffer, width / scale, height / scale);
+        resizePixelBuffer(buffer, width * config.render.resolution, height * config.render.resolution);
       },
       render({ time }) {
-        const angle = time * 0.8;
-        const zoom = 1.2 + Math.sin(time * 0.5) * 0.7;
+        const scaledTime = time * config.motion.speed;
+        const angle = scaledTime * config.motion.rotationSpeed;
+        const zoom = Math.max(
+          0.01,
+          config.motion.zoomBase + Math.sin(scaledTime * config.motion.zoomSpeed) * config.motion.zoomAmplitude
+        );
         const inverseZoom = 1 / zoom;
         const cosine = Math.cos(angle);
         const sine = Math.sin(angle);
@@ -757,19 +1817,82 @@
             const dx = x - centerX;
             const rotatedX = (cosine * dx + sine * dy) * inverseZoom;
             const rotatedY = (-sine * dx + cosine * dy) * inverseZoom;
-            const textureX = (rotatedX + TEXTURE_SIZE / 2 | 0) & 255;
-            const textureY = (rotatedY + TEXTURE_SIZE / 2 | 0) & 255;
-            buffer.pixels[index++] = texture[(textureY << 8) + textureX];
+            const textureX = Math.floor(rotatedX + textureSize / 2) % textureSize;
+            const textureY = Math.floor(rotatedY + textureSize / 2) % textureSize;
+            const wrappedX = (textureX + textureSize) % textureSize;
+            const wrappedY = (textureY + textureSize) % textureSize;
+            buffer.pixels[index++] = texture[wrappedY * textureSize + wrappedX];
           }
         }
-        presentPixelBuffer(context, buffer, width, height, true);
+        presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
       }
     };
   }
 
   // src/effects/feedback.js
-  function createFeedbackRenderer({ canvas }) {
-    const context = getContext2D(canvas);
+  var FEEDBACK_DEFAULTS = createEffectDefaults({
+    render: { resolution: 1, smoothing: true },
+    motion: {
+      speed: 1,
+      orbitSpeedX: 0.6,
+      orbitSpeedY: 0.7,
+      polygonRotationSpeed: 1,
+      passRotationStep: 0.3,
+      colorCycleSpeed: 0.17
+    },
+    appearance: {
+      palette: ["#ff58d6", "#5ca8ff", "#60ffd0", "#ffe66d", "#ff58d6"],
+      colorCount: 360,
+      backgroundColor: "#000005",
+      strokeAlpha: 0.9
+    },
+    geometry: {
+      sides: 5,
+      passes: 3,
+      radius: 40,
+      radiusOscillation: 14,
+      radiusOscillationSpeed: 3,
+      passSpacing: 8,
+      strokeWidth: 2,
+      shadowBlur: 18,
+      orbitX: 0.18,
+      orbitY: 0.18
+    },
+    feedback: {
+      alphaDecay: 0.93,
+      scale: 0.985,
+      rotation: 0.012,
+      fade: 0.96
+    }
+  });
+  function normalizeFeedbackConfig(input) {
+    return normalizeEffectConfig("feedback", input, FEEDBACK_DEFAULTS, (config) => {
+      for (const key of ["orbitSpeedX", "orbitSpeedY", "polygonRotationSpeed", "passRotationStep", "colorCycleSpeed"]) {
+        assertNumber(config.motion[key], `feedback.motion.${key}`);
+      }
+      assertNumber(config.appearance.strokeAlpha, "feedback.appearance.strokeAlpha", { min: 0, max: 1 });
+      assertNumber(config.geometry.sides, "feedback.geometry.sides", { min: 3, max: 64, integer: true });
+      assertNumber(config.geometry.passes, "feedback.geometry.passes", { min: 1, max: 32, integer: true });
+      for (const key of ["radius", "radiusOscillation", "radiusOscillationSpeed", "passSpacing", "strokeWidth", "shadowBlur"]) {
+        assertNumber(config.geometry[key], `feedback.geometry.${key}`, { min: 0 });
+      }
+      for (const key of ["orbitX", "orbitY"]) {
+        assertNumber(config.geometry[key], `feedback.geometry.${key}`, { min: 0, max: 1 });
+      }
+      for (const key of ["alphaDecay", "scale", "fade"]) {
+        assertNumber(config.feedback[key], `feedback.feedback.${key}`, { min: 0, max: 1 });
+      }
+      assertNumber(config.feedback.rotation, "feedback.feedback.rotation");
+    });
+  }
+  function createFeedbackRenderer({ canvas, config }) {
+    const output = getContext2D(canvas);
+    const buffer = createDrawingBuffer();
+    const context = buffer.context;
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
     let width = 1;
     let height = 1;
     let pointerX = null;
@@ -777,126 +1900,177 @@
     let hasRendered = false;
     return {
       resize(nextWidth, nextHeight) {
-        width = nextWidth;
-        height = nextHeight;
+        width = nextWidth * config.render.resolution;
+        height = nextHeight * config.render.resolution;
+        resizeDrawingBuffer(buffer, width, height);
         hasRendered = false;
       },
       pointer(x, y) {
-        pointerX = x;
-        pointerY = y;
+        pointerX = x === null ? null : x * config.render.resolution;
+        pointerY = y === null ? null : y * config.render.resolution;
       },
       render({ time, delta }) {
         if (hasRendered && delta === 0) return;
-        const frameFactor = delta * 60;
+        const frameFactor = delta * 60 * config.motion.speed;
         if (hasRendered) {
           context.globalCompositeOperation = "lighter";
-          context.globalAlpha = 0.93 ** frameFactor;
+          context.globalAlpha = config.feedback.alphaDecay ** frameFactor;
           context.save();
           context.translate(width / 2, height / 2);
-          context.rotate(0.012 * frameFactor);
-          context.scale(0.985 ** frameFactor, 0.985 ** frameFactor);
+          context.rotate(config.feedback.rotation * frameFactor);
+          context.scale(config.feedback.scale ** frameFactor, config.feedback.scale ** frameFactor);
           context.translate(-width / 2, -height / 2);
-          context.drawImage(canvas, 0, 0);
+          context.drawImage(buffer.canvas, 0, 0);
           context.restore();
           context.globalCompositeOperation = "source-over";
           context.globalAlpha = 1;
-          context.fillStyle = `rgba(0,0,5,${1 - 0.96 ** frameFactor})`;
+          context.fillStyle = config.appearance.backgroundColor;
+          context.globalAlpha = 1 - config.feedback.fade ** frameFactor;
+          context.fillRect(0, 0, width, height);
+          context.globalAlpha = 1;
+        } else {
+          context.fillStyle = config.appearance.backgroundColor;
           context.fillRect(0, 0, width, height);
         }
-        const centerX = pointerX === null ? width / 2 + Math.cos(time * 0.6) * width * 0.18 : pointerX;
-        const centerY = pointerY === null ? height / 2 + Math.sin(time * 0.7) * height * 0.18 : pointerY;
+        const scaledTime = time * config.motion.speed;
+        const centerX = pointerX ?? width / 2 + Math.cos(scaledTime * config.motion.orbitSpeedX) * width * config.geometry.orbitX;
+        const centerY = pointerY ?? height / 2 + Math.sin(scaledTime * config.motion.orbitSpeedY) * height * config.geometry.orbitY;
+        const radius = config.geometry.radius + Math.sin(scaledTime * config.geometry.radiusOscillationSpeed) * config.geometry.radiusOscillation;
         context.globalCompositeOperation = "lighter";
-        const hue = time * 60 % 360;
-        const sides = 5;
-        const radius = 40 + Math.sin(time * 3) * 14;
-        for (let pass = 0; pass < 3; pass++) {
+        for (let pass = 0; pass < config.geometry.passes; pass++) {
           context.beginPath();
-          const passRadius = radius + pass * 8;
-          for (let point = 0; point <= sides; point++) {
-            const angle = point / sides * Math.PI * 2 + time * (1 + pass * 0.3);
+          const passRadius = radius + pass * config.geometry.passSpacing;
+          for (let point = 0; point <= config.geometry.sides; point++) {
+            const angle = point / config.geometry.sides * Math.PI * 2 + scaledTime * (config.motion.polygonRotationSpeed + pass * config.motion.passRotationStep);
             const x = centerX + Math.cos(angle) * passRadius;
             const y = centerY + Math.sin(angle) * passRadius;
             if (point === 0) context.moveTo(x, y);
             else context.lineTo(x, y);
           }
-          context.lineWidth = 2;
-          context.strokeStyle = `hsla(${(hue + pass * 60) % 360},100%,65%,0.9)`;
+          const color = samplePackedPalette(
+            palette,
+            (scaledTime * config.motion.colorCycleSpeed + pass / config.geometry.passes) % 1
+          );
+          const red = color & 255;
+          const green = color >>> 8 & 255;
+          const blue = color >>> 16 & 255;
+          context.lineWidth = config.geometry.strokeWidth;
+          context.strokeStyle = `rgba(${red},${green},${blue},${config.appearance.strokeAlpha})`;
           context.shadowColor = context.strokeStyle;
-          context.shadowBlur = 18;
+          context.shadowBlur = config.geometry.shadowBlur;
           context.stroke();
         }
         context.shadowBlur = 0;
         context.globalAlpha = 1;
         context.globalCompositeOperation = "source-over";
         hasRendered = true;
+        presentDrawingBuffer(output, buffer, canvas.width, canvas.height, config.render.smoothing);
       }
     };
   }
 
   // src/effects/copper-bars.js
-  var BARS = [
-    { yBase: 0.22, amplitude: 0.12, frequency: 0.7, phase: 0, height: 0.048, hue: 0 },
-    { yBase: 0.4, amplitude: 0.1, frequency: 0.9, phase: 1, height: 0.063, hue: 60 },
-    { yBase: 0.55, amplitude: 0.13, frequency: 0.6, phase: 2, height: 0.041, hue: 120 },
-    { yBase: 0.7, amplitude: 0.11, frequency: 1, phase: 3, height: 0.074, hue: 200 },
-    { yBase: 0.85, amplitude: 0.09, frequency: 0.8, phase: 4, height: 0.052, hue: 290 }
+  var DEFAULT_BARS = [
+    { yBase: 0.22, amplitude: 0.12, frequency: 0.7, phase: 0, height: 0.048, colorOffset: 0 },
+    { yBase: 0.4, amplitude: 0.1, frequency: 0.9, phase: 1, height: 0.063, colorOffset: 0.2 },
+    { yBase: 0.55, amplitude: 0.13, frequency: 0.6, phase: 2, height: 0.041, colorOffset: 0.4 },
+    { yBase: 0.7, amplitude: 0.11, frequency: 1, phase: 3, height: 0.074, colorOffset: 0.65 },
+    { yBase: 0.85, amplitude: 0.09, frequency: 0.8, phase: 4, height: 0.052, colorOffset: 0.85 }
   ];
-  function copperHue(baseHue, normalizedRow, time) {
-    return (baseHue + normalizedRow * 80 + time * 40 + 360) % 360;
+  var COPPER_BARS_DEFAULTS = createEffectDefaults({
+    render: { resolution: 0.5, smoothing: true },
+    motion: { speed: 1, colorCycleSpeed: 0.06 },
+    appearance: {
+      palette: ["#ff244c", "#ffe844", "#28e880", "#35a8ff", "#dc4dff", "#ff244c"],
+      colorCount: 360,
+      backgroundColor: "#060812"
+    },
+    bars: DEFAULT_BARS,
+    shading: {
+      glossyFalloff: 0.7,
+      highlightStrength: 90,
+      highlightWidth: 1.5
+    }
+  });
+  function normalizeCopperBarsConfig(input) {
+    return normalizeEffectConfig("copperBars", input, COPPER_BARS_DEFAULTS, (config) => {
+      if (!Array.isArray(config.bars) || config.bars.length < 1 || config.bars.length > 64) {
+        throw new RangeError("copperBars.bars must contain between 1 and 64 bars.");
+      }
+      config.bars.forEach((bar, index) => {
+        for (const key of ["yBase", "amplitude", "frequency", "phase", "height", "colorOffset"]) {
+          assertNumber(bar[key], `copperBars.bars[${index}].${key}`, {
+            min: ["amplitude", "frequency", "height"].includes(key) ? 0 : -Infinity
+          });
+        }
+      });
+      assertNumber(config.motion.colorCycleSpeed, "copperBars.motion.colorCycleSpeed");
+      assertNumber(config.shading.glossyFalloff, "copperBars.shading.glossyFalloff", { min: Number.MIN_VALUE });
+      assertNumber(config.shading.highlightStrength, "copperBars.shading.highlightStrength", { min: 0 });
+      assertNumber(config.shading.highlightWidth, "copperBars.shading.highlightWidth", { min: 0 });
+    });
   }
-  function createCopperBarsRenderer({ canvas, quality }) {
+  function createCopperBarsRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
-    const scale = quality === "preview" ? 3 : 2;
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    const background = packHexColor(config.appearance.backgroundColor);
     let width = 1;
     let height = 1;
     return {
       resize(nextWidth, nextHeight) {
         width = nextWidth;
         height = nextHeight;
-        resizePixelBuffer(buffer, width / scale, height / scale);
+        resizePixelBuffer(buffer, width * config.render.resolution, height * config.render.resolution);
       },
       render({ time }) {
         let index = 0;
+        const scaledTime = time * config.motion.speed;
         for (let y = 0; y < buffer.height; y++) {
-          let red = 6;
-          let green = 8;
-          let blue = 18;
-          for (const bar of BARS) {
-            const center = (bar.yBase + bar.amplitude * Math.sin(time * bar.frequency + bar.phase)) * buffer.height;
+          let red = background & 255;
+          let green = background >>> 8 & 255;
+          let blue = background >>> 16 & 255;
+          for (const bar of config.bars) {
+            const center = (bar.yBase + bar.amplitude * Math.sin(scaledTime * bar.frequency + bar.phase)) * buffer.height;
             const distance = y - center;
             const halfHeight = Math.max(2, bar.height * buffer.height);
             if (Math.abs(distance) > halfHeight) continue;
             const normalized = distance / halfHeight;
             const falloff = 1 - Math.abs(normalized);
-            const glossy = falloff ** 0.7;
-            const color = hslToRgb(copperHue(bar.hue, normalized, time), 100, 55);
-            red += color[0] * glossy;
-            green += color[1] * glossy;
-            blue += color[2] * glossy;
-            if (Math.abs(distance) < 1.5) {
-              red += 90;
-              green += 90;
-              blue += 90;
+            const glossy = falloff ** config.shading.glossyFalloff;
+            const color = samplePackedPalette(
+              palette,
+              ((bar.colorOffset + normalized * 0.12 + scaledTime * config.motion.colorCycleSpeed) % 1 + 1) % 1
+            );
+            red += (color & 255) * glossy;
+            green += (color >>> 8 & 255) * glossy;
+            blue += (color >>> 16 & 255) * glossy;
+            if (Math.abs(distance) < config.shading.highlightWidth) {
+              red += config.shading.highlightStrength;
+              green += config.shading.highlightStrength;
+              blue += config.shading.highlightStrength;
             }
           }
           const pixel = packRgb(Math.min(255, red), Math.min(255, green), Math.min(255, blue));
           for (let x = 0; x < buffer.width; x++) buffer.pixels[index++] = pixel;
         }
-        presentPixelBuffer(context, buffer, width, height, true);
+        presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
       }
     };
   }
 
   // browser-entry.js
-  installEffect("plasma", createPlasmaRenderer);
-  installEffect("fire", createFireRenderer);
-  installEffect("starfield", createStarfieldRenderer);
-  installEffect("metaballs", createMetaballsRenderer);
-  installEffect("tunnel", createTunnelRenderer);
-  installEffect("mandelbrot", createMandelbrotRenderer);
-  installEffect("sineScroller", createSineScrollerRenderer);
-  installEffect("rotozoom", createRotozoomRenderer);
-  installEffect("feedback", createFeedbackRenderer);
-  installEffect("copperBars", createCopperBarsRenderer);
+  installEffect("plasma", createPlasmaRenderer, normalizePlasmaConfig);
+  installEffect("fire", createFireRenderer, normalizeFireConfig);
+  installEffect("starfield", createStarfieldRenderer, normalizeStarfieldConfig);
+  installEffect("metaballs", createMetaballsRenderer, normalizeMetaballsConfig);
+  installEffect("tunnel", createTunnelRenderer, normalizeTunnelConfig);
+  installEffect("mandelbrot", createMandelbrotRenderer, normalizeMandelbrotConfig);
+  installEffect("sineScroller", createSineScrollerRenderer, normalizeSineScrollerConfig);
+  installEffect("rotozoom", createRotozoomRenderer, normalizeRotozoomConfig);
+  installEffect("feedback", createFeedbackRenderer, normalizeFeedbackConfig);
+  installEffect("copperBars", createCopperBarsRenderer, normalizeCopperBarsConfig);
 })();

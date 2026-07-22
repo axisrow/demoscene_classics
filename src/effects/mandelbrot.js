@@ -1,100 +1,128 @@
-import { buildSinePalette, createPixelBuffer, getContext2D, packRgb, presentPixelBuffer, resizePixelBuffer } from './utils.js';
+import {
+  assertNumber,
+  assertString,
+  createEffectDefaults,
+  normalizeEffectConfig
+} from '../config.js';
+import { mandelbrotZoom, renderMandelbrotPixels } from './mandelbrot-core.js';
+import {
+  createMandelbrotWebGLRenderer,
+  probeMandelbrotWebGL2
+} from './mandelbrot-webgl.js';
+import {
+  buildGradientPalette,
+  createPixelBuffer,
+  getContext2D,
+  packHexColor,
+  packRgb,
+  presentPixelBuffer,
+  resizePixelBuffer
+} from './utils.js';
 
-const TARGET_X = -0.7436438870371587;
-const TARGET_Y = 0.1318259042053119;
 export const MANDELBROT_INTERIOR_COLOR = packRgb(0, 0, 0);
 
-function buildPalette() {
-  return buildSinePalette(new Uint32Array(1024), (index) => index / 1024 * Math.PI * 2);
+export const MANDELBROT_DEFAULTS = createEffectDefaults({
+  render: { backend: 'canvas2d', resolution: 0.2, smoothing: false },
+  motion: { speed: 1, cycleSeconds: 28, startPhase: 0 },
+  appearance: {
+    palette: [
+      '#80ed12', '#bfbf01', '#ed8012', '#ff4040', '#ed127f', '#bf01bf', '#8012ed',
+      '#4040ff', '#127fed', '#01bfbf', '#12ed80', '#40ff40', '#7fed12'
+    ],
+    colorCount: 1024,
+    backgroundColor: '#000000',
+    interiorColor: '#000000'
+  },
+  camera: {
+    centerX: -0.7436438870371587,
+    centerY: 0.1318259042053119,
+    minZoom: 1,
+    maxZoom: 1_000_000
+  },
+  algorithm: {
+    iterationBase: 80,
+    iterationGrowth: 60,
+    maxIterations: null,
+    escapeRadius: 16
+  }
+});
+
+export function normalizeMandelbrotConfig(input) {
+  return normalizeEffectConfig('mandelbrot', input, MANDELBROT_DEFAULTS, (config) => {
+    assertString(config.render.backend, 'mandelbrot.render.backend');
+    if (!['auto', 'webgl2', 'canvas2d'].includes(config.render.backend)) {
+      throw new RangeError('mandelbrot.render.backend must be auto, webgl2 or canvas2d.');
+    }
+    assertNumber(config.motion.cycleSeconds, 'mandelbrot.motion.cycleSeconds', { min: Number.MIN_VALUE });
+    assertNumber(config.motion.startPhase, 'mandelbrot.motion.startPhase', { min: 0, max: 1 });
+    for (const key of ['centerX', 'centerY']) {
+      assertNumber(config.camera[key], `mandelbrot.camera.${key}`);
+    }
+    assertNumber(config.camera.minZoom, 'mandelbrot.camera.minZoom', { min: Number.MIN_VALUE });
+    assertNumber(config.camera.maxZoom, 'mandelbrot.camera.maxZoom', {
+      min: config.camera.minZoom + Number.EPSILON
+    });
+    assertNumber(config.algorithm.iterationBase, 'mandelbrot.algorithm.iterationBase', { min: 1 });
+    assertNumber(config.algorithm.iterationGrowth, 'mandelbrot.algorithm.iterationGrowth', { min: 0 });
+    if (config.algorithm.maxIterations !== null) {
+      assertNumber(config.algorithm.maxIterations, 'mandelbrot.algorithm.maxIterations', {
+        min: 1,
+        max: 10000,
+        integer: true
+      });
+    }
+    assertNumber(config.algorithm.escapeRadius, 'mandelbrot.algorithm.escapeRadius', { min: 2 });
+  });
 }
 
-export function mandelbrotZoom(time) {
-  const phase = (time / 28) % 1;
-  const wave = (Math.sin(phase * Math.PI * 2 - Math.PI / 2) + 1) / 2;
-  const eased = wave * wave * (3 - 2 * wave);
-  return 10 ** (eased * 6);
-}
+export { mandelbrotZoom, renderMandelbrotPixels };
 
-export function mandelbrotScale(zoom, quality) {
-  if (quality === 'preview') return 3;
-  if (zoom < 100) return 3;
-  if (zoom < 10_000) return 5;
-  return 10;
-}
-
-function isMainInterior(real, imaginary) {
-  const shifted = real - 0.25;
-  const q = shifted * shifted + imaginary * imaginary;
-  return q * (q + shifted) <= 0.25 * imaginary * imaginary
-    || (real + 1) * (real + 1) + imaginary * imaginary <= 0.0625;
-}
-
-export function createMandelbrotRenderer({ canvas, quality }) {
+export function createMandelbrotCanvas2DRenderer({ canvas, config }) {
   const context = getContext2D(canvas, { alpha: false });
   const buffer = createPixelBuffer();
-  const palette = buildPalette();
+  const palette = buildGradientPalette(
+    new Uint32Array(config.appearance.colorCount),
+    config.appearance.palette
+  );
+  const interiorColor = packHexColor(config.appearance.interiorColor);
   let width = 1;
   let height = 1;
-  let scale = 0;
-
-  function ensureBuffer(nextScale) {
-    if (scale === nextScale && buffer.image) return;
-    scale = nextScale;
-    resizePixelBuffer(buffer, width / scale, height / scale);
-  }
 
   return {
     resize(nextWidth, nextHeight) {
       width = nextWidth;
       height = nextHeight;
-      scale = 0;
+      resizePixelBuffer(
+        buffer,
+        width * config.render.resolution,
+        height * config.render.resolution
+      );
     },
     render({ time }) {
-      const zoom = mandelbrotZoom(time);
-      ensureBuffer(mandelbrotScale(zoom, quality));
-      const span = 3 / zoom;
-      const aspect = buffer.width / buffer.height;
-      const calculatedIterations = Math.floor(80 + 60 * Math.log10(zoom + 1));
-      const maxIterations = quality === 'preview'
-        ? Math.min(64, calculatedIterations)
-        : calculatedIterations;
-      const log2 = Math.log(2);
-      let index = 0;
-
-      for (let y = 0; y < buffer.height; y++) {
-        const imaginary = TARGET_Y + (y / buffer.height - 0.5) * 2 * span / aspect;
-        for (let x = 0; x < buffer.width; x++) {
-          const real = TARGET_X + (x / buffer.width - 0.5) * 2 * span;
-          if (isMainInterior(real, imaginary)) {
-            buffer.pixels[index++] = MANDELBROT_INTERIOR_COLOR;
-            continue;
-          }
-
-          let zReal = 0;
-          let zImaginary = 0;
-          let zRealSquared = 0;
-          let zImaginarySquared = 0;
-          let iteration = 0;
-          while (zRealSquared + zImaginarySquared < 256 && iteration < maxIterations) {
-            zImaginary = 2 * zReal * zImaginary + imaginary;
-            zReal = zRealSquared - zImaginarySquared + real;
-            zRealSquared = zReal * zReal;
-            zImaginarySquared = zImaginary * zImaginary;
-            iteration++;
-          }
-
-          if (iteration === maxIterations) {
-            buffer.pixels[index++] = MANDELBROT_INTERIOR_COLOR;
-            continue;
-          }
-
-          const logZn = Math.log(zRealSquared + zImaginarySquared) / 2;
-          const nu = Math.log(logZn / log2) / log2;
-          const smooth = iteration + 1 - nu;
-          buffer.pixels[index++] = palette[(smooth * 8) & 1023];
-        }
-      }
-      presentPixelBuffer(context, buffer, width, height, false);
+      renderMandelbrotPixels({
+        pixels: buffer.pixels,
+        width: buffer.width,
+        height: buffer.height,
+        time,
+        config,
+        palette,
+        interiorColor
+      });
+      presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
+    },
+    getStats() {
+      return { backend: 'canvas2d' };
     }
   };
+}
+
+export function createMandelbrotRenderer({ canvas, config }) {
+  if (config.render.backend !== 'canvas2d' && probeMandelbrotWebGL2()) {
+    try {
+      return createMandelbrotWebGLRenderer({ canvas, config });
+    } catch (error) {
+      globalThis.console?.warn?.('Mandelbrot WebGL2 unavailable; using Canvas 2D.', error);
+    }
+  }
+  return createMandelbrotCanvas2DRenderer({ canvas, config });
 }

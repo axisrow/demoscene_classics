@@ -1,5 +1,11 @@
+import { cloneConfig } from './config.js';
+
 const RUNTIME_KEY = Symbol.for('demoscene-classics.runtime');
 const MAX_DELTA_SECONDS = 0.05;
+// requestAnimationFrame timestamps regularly land a fraction of a millisecond
+// before an exact 60/30 FPS boundary. Without a small tolerance, one early
+// callback makes the limiter skip a whole display refresh.
+const FRAME_INTERVAL_TOLERANCE_MS = 1;
 
 function resolveCanvas(target) {
   const canvas = typeof target === 'string'
@@ -15,12 +21,14 @@ function resolveCanvas(target) {
   return canvas;
 }
 
-function measureCanvas(canvas) {
+function measureCanvas(canvas, pixelRatio = 1) {
   const rect = typeof canvas.getBoundingClientRect === 'function'
     ? canvas.getBoundingClientRect()
     : null;
-  const width = Math.max(1, Math.round(rect?.width || canvas.clientWidth || canvas.width || 1));
-  const height = Math.max(1, Math.round(rect?.height || canvas.clientHeight || canvas.height || 1));
+  const cssWidth = rect?.width || canvas.clientWidth || canvas.width || 1;
+  const cssHeight = rect?.height || canvas.clientHeight || canvas.height || 1;
+  const width = Math.max(1, Math.round(cssWidth * pixelRatio));
+  const height = Math.max(1, Math.round(cssHeight * pixelRatio));
   return { width, height };
 }
 
@@ -87,24 +95,21 @@ function getScheduler() {
 }
 
 /**
- * @typedef {'full' | 'preview'} QualityProfile
- * @typedef {{ quality?: QualityProfile, autoStart?: boolean }} EffectOptions
- * @typedef {{ start(): EffectController, stop(): EffectController, resize(): EffectController, destroy(): void }} EffectController
+ * @typedef {{ runtime: { autoStart: boolean, maxFps: number, pixelRatio: number, pauseWhenHidden: boolean } }} EffectConfig
+ * @typedef {{ start(): EffectController, stop(): EffectController, resize(): EffectController, renderOnce(timeSeconds?: number): EffectController, getConfig(): EffectConfig, getStats(): object, destroy(): void }} EffectController
  */
 
 /**
  * Mount an internal renderer onto a canvas.
  * @param {string | HTMLCanvasElement} target
- * @param {(context: {canvas: HTMLCanvasElement, quality: QualityProfile}) => object} rendererFactory
- * @param {EffectOptions} [options]
+ * @param {(context: {canvas: HTMLCanvasElement, config: EffectConfig}) => object} rendererFactory
+ * @param {EffectConfig} config
  * @returns {EffectController}
  */
-export function mountEffect(target, rendererFactory, options = {}) {
+export function mountEffect(target, rendererFactory, config) {
   const canvas = resolveCanvas(target);
-  const quality = options.quality ?? 'full';
-  if (quality !== 'full' && quality !== 'preview') {
-    throw new RangeError('Demoscene quality must be "full" or "preview".');
-  }
+  const { autoStart, maxFps, pixelRatio, pauseWhenHidden } = config.runtime;
+  const minimumFrameInterval = maxFps === Infinity ? 0 : 1000 / maxFps;
 
   const scheduler = getScheduler();
   let renderer;
@@ -112,26 +117,43 @@ export function mountEffect(target, rendererFactory, options = {}) {
   let visible = true;
   let destroyed = false;
   let elapsed = 0;
+  let staticTime = null;
   let lastTimestamp = null;
+  let lastRenderTimestamp = null;
+  let pendingDelta = 0;
   let resizeObserver = null;
   let intersectionObserver = null;
   let fallbackResizeListener = null;
   let width = 0;
   let height = 0;
+  let renderedFrames = 0;
+  let lastFrameMs = 0;
+  let totalFrameMs = 0;
+
+  function renderFrame(frame) {
+    const started = globalThis.performance?.now?.() ?? Date.now();
+    renderer.render(frame);
+    lastFrameMs = (globalThis.performance?.now?.() ?? Date.now()) - started;
+    totalFrameMs += lastFrameMs;
+    renderedFrames++;
+  }
 
   function applySize(force = false) {
     if (destroyed) return;
-    const size = measureCanvas(canvas);
+    const size = measureCanvas(canvas, pixelRatio);
     if (!force && size.width === width && size.height === height) return;
     width = size.width;
     height = size.height;
     canvas.width = width;
     canvas.height = height;
     renderer?.resize?.(width, height);
+    if (renderer && staticTime !== null && !running) {
+      renderFrame({ time: staticTime, delta: 0 });
+    }
   }
 
   applySize(true);
-  renderer = rendererFactory({ canvas, quality });
+  renderer = rendererFactory({ canvas, config });
   if (!renderer || typeof renderer.render !== 'function') {
     throw new TypeError('A Demoscene renderer must provide render().');
   }
@@ -141,7 +163,10 @@ export function mountEffect(target, rendererFactory, options = {}) {
     start() {
       if (destroyed || running) return controller;
       running = true;
+      staticTime = null;
       lastTimestamp = null;
+      lastRenderTimestamp = null;
+      pendingDelta = 0;
       scheduler.add(controller);
       return controller;
     },
@@ -149,12 +174,36 @@ export function mountEffect(target, rendererFactory, options = {}) {
       if (!running) return controller;
       running = false;
       lastTimestamp = null;
+      lastRenderTimestamp = null;
+      pendingDelta = 0;
       scheduler.remove(controller);
       return controller;
     },
     resize() {
       applySize(true);
       return controller;
+    },
+    renderOnce(timeSeconds = 0) {
+      if (destroyed) return controller;
+      if (!Number.isFinite(timeSeconds) || timeSeconds < 0) {
+        throw new RangeError('Demoscene renderOnce time must be a non-negative number.');
+      }
+      controller.stop();
+      elapsed = timeSeconds;
+      staticTime = timeSeconds;
+      applySize(true);
+      return controller;
+    },
+    getConfig() {
+      return cloneConfig(config);
+    },
+    getStats() {
+      return {
+        backend: renderer?.getStats?.().backend ?? 'canvas2d',
+        renderedFrames,
+        lastFrameMs,
+        averageFrameMs: renderedFrames ? totalFrameMs / renderedFrames : 0
+      };
     },
     destroy() {
       if (destroyed) return;
@@ -173,7 +222,8 @@ export function mountEffect(target, rendererFactory, options = {}) {
       renderer = null;
     },
     _isRunnable() {
-      return running && visible && !destroyed;
+      return running && visible && !destroyed
+        && (typeof renderer?.isAvailable !== 'function' || renderer.isAvailable());
     },
     _tick(timestamp) {
       let delta = 0;
@@ -181,10 +231,21 @@ export function mountEffect(target, rendererFactory, options = {}) {
         delta = Math.min(MAX_DELTA_SECONDS, Math.max(0, (timestamp - lastTimestamp) / 1000));
       }
       lastTimestamp = timestamp;
-      elapsed += delta;
-      renderer.render({ time: elapsed, delta });
+      pendingDelta += delta;
+      if (lastRenderTimestamp !== null
+          && timestamp - lastRenderTimestamp + FRAME_INTERVAL_TOLERANCE_MS
+            < minimumFrameInterval) {
+        return;
+      }
+      lastRenderTimestamp = timestamp;
+      const renderDelta = pendingDelta;
+      pendingDelta = 0;
+      elapsed += renderDelta;
+      renderFrame({ time: elapsed, delta: renderDelta });
     }
   };
+
+  renderer.setWake?.(() => scheduler.wake());
 
   function onPointerMove(event) {
     const rect = canvas.getBoundingClientRect();
@@ -207,13 +268,15 @@ export function mountEffect(target, rendererFactory, options = {}) {
     globalThis.addEventListener('resize', fallbackResizeListener);
   }
 
-  if (quality === 'preview' && typeof globalThis.IntersectionObserver === 'function') {
+  if (pauseWhenHidden && typeof globalThis.IntersectionObserver === 'function') {
     intersectionObserver = new globalThis.IntersectionObserver((entries) => {
       const entry = entries[entries.length - 1];
       const nextVisible = Boolean(entry?.isIntersecting);
       if (visible === nextVisible) return;
       visible = nextVisible;
       lastTimestamp = null;
+      lastRenderTimestamp = null;
+      pendingDelta = 0;
       if (visible) scheduler.wake();
     });
     intersectionObserver.observe(canvas);
@@ -224,6 +287,6 @@ export function mountEffect(target, rendererFactory, options = {}) {
     canvas.addEventListener('pointerleave', onPointerLeave);
   }
 
-  if (options.autoStart !== false) controller.start();
+  if (autoStart) controller.start();
   return controller;
 }

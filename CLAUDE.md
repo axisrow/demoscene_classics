@@ -32,14 +32,14 @@ Three layers, each cleanly separated:
 
 2. **Install (`src/install.js`)** — `installEffect(name, rendererFactory)` registers `Demoscene.<name>(target, options)` on the global namespace, merging into any existing `globalThis.Demoscene` object. This merging is what lets several standalone effect scripts coexist on one page.
 
-3. **Effects (`src/effects/*.js`)** — each exports a `create<Name>Renderer({ canvas, quality })` factory returning an object with `render({ time, delta })` and optionally `resize(w, h)`, `pointer(x, y)`, and `destroy()`. Effects are pure Canvas 2D; they never touch rAF, sizing, or the DOM directly — that is all the runtime's job.
+3. **Effects (`src/effects/*.js`)** — each exports a `normalize<Name>Config(input)` function and a `create<Name>Renderer({ canvas, config })` factory returning an object with `render({ time, delta })` and optionally `resize(w, h)`, `pointer(x, y)`, and `destroy()`. Effects are pure Canvas 2D; they never touch rAF, sizing, or the DOM directly — that is all the runtime's job.
 
 **The renderer contract** (enforced by `mountEffect`):
 - `render({ time, delta })` is required.
 - `resize`, `pointer`, `destroy` are optional and only called if present. A renderer that wants pointer input exposes `pointer(x, y)` (or `pointer(null, null)` on pointer-leave) and the runtime attaches the listeners.
 - All animations must be driven by `time`/`delta`, never by frame count. `time`-based determinism is asserted: the same logical frame must be produced regardless of 60 Hz vs 120 Hz refresh.
 
-**Quality profiles:** `quality: 'full' | 'preview'`. Most effects pick a render-scale constant from this (e.g. `const scale = quality === 'preview' ? 3 : 4`). Preview instances run the same renderer at a smaller pixel budget and auto-pause when offscreen. `quality` defaults to `'full'`; an invalid value throws `RangeError`.
+**Structured skins (API v2):** every effect receives strict JSON-compatible groups such as `runtime`, `render`, `motion`, and `appearance`, plus effect-specific groups. `render.resolution` replaces hidden quality profiles and `runtime.pauseWhenHidden` controls viewport scheduling. Unknown keys fail with their full path. Options are immutable after mounting; change a skin by destroying and remounting the effect.
 
 **Pixel effects** (plasma, fire, metaballs, tunnel, mandelbrot, rotozoom) render into an offscreen `ImageData`/`Uint32Array` pixel buffer via the helpers in `src/effects/utils.js` (`createPixelBuffer`, `resizePixelBuffer`, `presentPixelBuffer`, `packRgb`, `hslToPacked`) and upscale to the visible canvas with `imageSmoothingEnabled = false`. `packRgb` packs little-endian RGBA into one `Uint32`. Vector effects (starfield, sine-scroller, feedback, copper-bars) draw directly on the 2D context.
 

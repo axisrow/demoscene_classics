@@ -1,49 +1,78 @@
-import { createPixelBuffer, getContext2D, packRgb, presentPixelBuffer, resizePixelBuffer } from './utils.js';
+import {
+  assertNumber,
+  createEffectDefaults,
+  normalizeEffectConfig
+} from '../config.js';
+import {
+  buildGradientPalette,
+  createPixelBuffer,
+  createSeededRandom,
+  getContext2D,
+  presentPixelBuffer,
+  resizePixelBuffer
+} from './utils.js';
 
-const STEP_SECONDS = 1 / 60;
+export const FIRE_DEFAULTS = createEffectDefaults({
+  render: { resolution: 0.25, smoothing: false },
+  motion: { speed: 1 },
+  appearance: {
+    palette: ['#000000', '#ff0000', '#ffff00', '#ffffff'],
+    colorCount: 256,
+    backgroundColor: '#000000'
+  },
+  simulation: {
+    seed: 1993,
+    stepHz: 60,
+    sourceDensity: 0.65,
+    sourceIntensity: 255,
+    sourceVariance: 96,
+    cooling: 2,
+    horizontalDrift: 1,
+    maxCatchUpSteps: 3
+  }
+});
 
-export function createFireRenderer({ canvas, quality }) {
+export function normalizeFireConfig(input) {
+  return normalizeEffectConfig('fire', input, FIRE_DEFAULTS, (config) => {
+    assertNumber(config.simulation.seed, 'fire.simulation.seed', { min: 0, max: 0xffffffff, integer: true });
+    assertNumber(config.simulation.stepHz, 'fire.simulation.stepHz', { min: 1, max: 240 });
+    assertNumber(config.simulation.sourceDensity, 'fire.simulation.sourceDensity', { min: 0, max: 1 });
+    assertNumber(config.simulation.sourceIntensity, 'fire.simulation.sourceIntensity', { min: 0, max: 255, integer: true });
+    assertNumber(config.simulation.sourceVariance, 'fire.simulation.sourceVariance', { min: 0, max: 255, integer: true });
+    assertNumber(config.simulation.cooling, 'fire.simulation.cooling', { min: 0, max: 32, integer: true });
+    assertNumber(config.simulation.horizontalDrift, 'fire.simulation.horizontalDrift', { min: 0, max: 16, integer: true });
+    assertNumber(config.simulation.maxCatchUpSteps, 'fire.simulation.maxCatchUpSteps', { min: 1, max: 20, integer: true });
+  });
+}
+
+export function createFireRenderer({ canvas, config }) {
   const context = getContext2D(canvas, { alpha: false });
   const buffer = createPixelBuffer();
-  const palette = new Uint32Array(256);
-  const scale = quality === 'preview' ? 3 : 4;
+  const palette = buildGradientPalette(
+    new Uint32Array(config.appearance.colorCount),
+    config.appearance.palette
+  );
+  let random = createSeededRandom(config.simulation.seed);
   let heat = new Uint8Array(0);
   let accumulator = 0;
   let width = 1;
   let height = 1;
 
-  for (let i = 0; i < 256; i++) {
-    let red;
-    let green;
-    let blue;
-    if (i < 64) {
-      red = i * 4; green = 0; blue = 0;
-    } else if (i < 128) {
-      red = 255; green = (i - 64) * 4; blue = 0;
-    } else if (i < 192) {
-      red = 255; green = 255; blue = (i - 128) * 4;
-    } else {
-      red = 255; green = 255; blue = 255;
-    }
-    palette[i] = packRgb(red, green, blue);
-  }
-
   function spread() {
     const lastRow = buffer.height - 1;
     for (let x = 0; x < buffer.width; x++) {
-      heat[lastRow * buffer.width + x] = Math.random() < 0.65
-        ? 255
-        : Math.floor(Math.random() * 96);
+      heat[lastRow * buffer.width + x] = random() < config.simulation.sourceDensity
+        ? config.simulation.sourceIntensity
+        : Math.floor(random() * config.simulation.sourceVariance);
     }
-
     for (let y = 1; y < buffer.height; y++) {
       const row = y * buffer.width;
       const previousRow = (y - 1) * buffer.width;
       for (let x = 0; x < buffer.width; x++) {
-        const random = (Math.random() * 3) | 0;
-        const drift = x + (random & 1) - 1 + ((random >> 1) & 1);
-        const targetX = (drift + buffer.width) % buffer.width;
-        heat[previousRow + targetX] = Math.max(0, heat[row + x] - random);
+        const cooling = Math.floor(random() * (config.simulation.cooling + 1));
+        const drift = Math.floor((random() * 2 - 1) * (config.simulation.horizontalDrift + 1));
+        const targetX = (x + drift + buffer.width) % buffer.width;
+        heat[previousRow + targetX] = Math.max(0, heat[row + x] - cooling);
       }
     }
   }
@@ -52,20 +81,25 @@ export function createFireRenderer({ canvas, quality }) {
     resize(nextWidth, nextHeight) {
       width = nextWidth;
       height = nextHeight;
-      resizePixelBuffer(buffer, width / scale, height / scale);
+      resizePixelBuffer(buffer, width * config.render.resolution, height * config.render.resolution);
+      random = createSeededRandom(config.simulation.seed);
       heat = new Uint8Array(buffer.width * buffer.height);
       accumulator = 0;
     },
     render({ delta }) {
-      accumulator += delta;
+      accumulator += delta * config.motion.speed;
+      const stepSeconds = 1 / config.simulation.stepHz;
       let steps = 0;
-      while (accumulator >= STEP_SECONDS && steps < 3) {
+      while (accumulator >= stepSeconds && steps < config.simulation.maxCatchUpSteps) {
         spread();
-        accumulator -= STEP_SECONDS;
+        accumulator -= stepSeconds;
         steps++;
       }
-      for (let i = 0; i < heat.length; i++) buffer.pixels[i] = palette[heat[i]];
-      presentPixelBuffer(context, buffer, width, height, false);
+      for (let i = 0; i < heat.length; i++) {
+        const paletteIndex = Math.round(heat[i] / 255 * (palette.length - 1));
+        buffer.pixels[i] = palette[paletteIndex];
+      }
+      presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
     }
   };
 }

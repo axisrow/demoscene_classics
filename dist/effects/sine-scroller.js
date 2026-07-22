@@ -1,7 +1,134 @@
 (() => {
+  // src/config.js
+  function isPlainObject(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+  function cloneValue(value) {
+    if (Array.isArray(value)) return value.map(cloneValue);
+    if (isPlainObject(value)) {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneValue(item)]));
+    }
+    return value;
+  }
+  function freezeValue(value) {
+    if (Array.isArray(value)) value.forEach(freezeValue);
+    else if (isPlainObject(value)) Object.values(value).forEach(freezeValue);
+    return value !== null && typeof value === "object" ? Object.freeze(value) : value;
+  }
+  function assertKnownKeys(effectName, input, defaults, path = effectName) {
+    if (!isPlainObject(input)) throw new TypeError(`${path} must be an object.`);
+    for (const [key, value] of Object.entries(input)) {
+      if (!(key in defaults)) throw new RangeError(`Unknown option: ${path}.${key}`);
+      const template = defaults[key];
+      if (isPlainObject(value) && isPlainObject(template)) {
+        assertKnownKeys(effectName, value, template, `${path}.${key}`);
+      } else if (Array.isArray(value) && Array.isArray(template) && isPlainObject(template[0])) {
+        value.forEach((item, index) => assertKnownKeys(
+          effectName,
+          item,
+          template[0],
+          `${path}.${key}[${index}]`
+        ));
+      }
+    }
+  }
+  function mergeValue(defaultValue, inputValue) {
+    if (inputValue === void 0) return cloneValue(defaultValue);
+    if (isPlainObject(defaultValue) && isPlainObject(inputValue)) {
+      const result = {};
+      const keys = /* @__PURE__ */ new Set([...Object.keys(defaultValue), ...Object.keys(inputValue)]);
+      for (const key of keys) {
+        result[key] = mergeValue(defaultValue[key], inputValue[key]);
+      }
+      return result;
+    }
+    return cloneValue(inputValue);
+  }
+  function assertNumber(value, path, { min = -Infinity, max = Infinity, integer = false } = {}) {
+    if (!Number.isFinite(value) || value < min || value > max || integer && !Number.isInteger(value)) {
+      const kind = integer ? "an integer" : "a finite number";
+      throw new RangeError(`${path} must be ${kind} between ${min} and ${max}.`);
+    }
+  }
+  function assertBoolean(value, path) {
+    if (typeof value !== "boolean") throw new TypeError(`${path} must be a boolean.`);
+  }
+  function assertString(value, path, { allowEmpty = false } = {}) {
+    if (typeof value !== "string" || !allowEmpty && value.length === 0) {
+      throw new TypeError(`${path} must be a${allowEmpty ? "" : " non-empty"} string.`);
+    }
+  }
+  function assertPalette(palette, path, colorCount) {
+    if (!Array.isArray(palette) || palette.length < 2 || palette.length > 64) {
+      throw new RangeError(`${path} must contain between 2 and 64 colours.`);
+    }
+    palette.forEach((color, index) => {
+      assertString(color, `${path}[${index}]`);
+      if (!/^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(color)) {
+        throw new TypeError(`${path}[${index}] must use #rgb or #rrggbb.`);
+      }
+    });
+    assertNumber(colorCount, path.replace(/palette$/, "colorCount"), {
+      min: 2,
+      max: 4096,
+      integer: true
+    });
+  }
+  function validateCommonConfig(effectName, config) {
+    const { runtime, render, motion, appearance } = config;
+    assertBoolean(runtime.autoStart, `${effectName}.runtime.autoStart`);
+    assertNumber(runtime.maxFps, `${effectName}.runtime.maxFps`, { min: 1, max: 240 });
+    assertNumber(runtime.pixelRatio, `${effectName}.runtime.pixelRatio`, { min: 1, max: 2 });
+    assertBoolean(runtime.pauseWhenHidden, `${effectName}.runtime.pauseWhenHidden`);
+    assertNumber(render.resolution, `${effectName}.render.resolution`, { min: 0.1, max: 1 });
+    assertBoolean(render.smoothing, `${effectName}.render.smoothing`);
+    assertNumber(motion.speed, `${effectName}.motion.speed`, { min: Number.MIN_VALUE });
+    assertPalette(appearance.palette, `${effectName}.appearance.palette`, appearance.colorCount);
+    assertString(appearance.backgroundColor, `${effectName}.appearance.backgroundColor`);
+  }
+  function normalizeEffectConfig(effectName, input, defaults, validate = () => {
+  }) {
+    const supplied = input === void 0 ? {} : input;
+    assertKnownKeys(effectName, supplied, defaults);
+    const config = mergeValue(defaults, supplied);
+    validateCommonConfig(effectName, config);
+    validate(config);
+    return freezeValue(config);
+  }
+  function cloneConfig(config) {
+    return cloneValue(config);
+  }
+  function createEffectDefaults(overrides = {}) {
+    return freezeValue(mergeValue({
+      runtime: COMMON_DEFAULTS.runtime,
+      render: COMMON_DEFAULTS.render,
+      motion: COMMON_DEFAULTS.motion,
+      appearance: COMMON_DEFAULTS.appearance
+    }, overrides));
+  }
+  var COMMON_DEFAULTS = Object.freeze({
+    runtime: Object.freeze({
+      autoStart: true,
+      maxFps: 60,
+      pixelRatio: 1,
+      pauseWhenHidden: true
+    }),
+    render: Object.freeze({
+      resolution: 1,
+      smoothing: false
+    }),
+    motion: Object.freeze({ speed: 1 }),
+    appearance: Object.freeze({
+      palette: Object.freeze(["#000000", "#ffffff"]),
+      colorCount: 256,
+      backgroundColor: "#000000"
+    })
+  });
+
   // src/runtime.js
   var RUNTIME_KEY = Symbol.for("demoscene-classics.runtime");
   var MAX_DELTA_SECONDS = 0.05;
+  var FRAME_INTERVAL_TOLERANCE_MS = 1;
   function resolveCanvas(target) {
     const canvas = typeof target === "string" ? globalThis.document?.querySelector(target) : target;
     if (!canvas) {
@@ -12,10 +139,12 @@
     }
     return canvas;
   }
-  function measureCanvas(canvas) {
+  function measureCanvas(canvas, pixelRatio = 1) {
     const rect = typeof canvas.getBoundingClientRect === "function" ? canvas.getBoundingClientRect() : null;
-    const width = Math.max(1, Math.round(rect?.width || canvas.clientWidth || canvas.width || 1));
-    const height = Math.max(1, Math.round(rect?.height || canvas.clientHeight || canvas.height || 1));
+    const cssWidth = rect?.width || canvas.clientWidth || canvas.width || 1;
+    const cssHeight = rect?.height || canvas.clientHeight || canvas.height || 1;
+    const width = Math.max(1, Math.round(cssWidth * pixelRatio));
+    const height = Math.max(1, Math.round(cssHeight * pixelRatio));
     return { width, height };
   }
   function createScheduler() {
@@ -72,36 +201,50 @@
     }
     return globalThis[RUNTIME_KEY];
   }
-  function mountEffect(target, rendererFactory, options = {}) {
+  function mountEffect(target, rendererFactory, config) {
     const canvas = resolveCanvas(target);
-    const quality = options.quality ?? "full";
-    if (quality !== "full" && quality !== "preview") {
-      throw new RangeError('Demoscene quality must be "full" or "preview".');
-    }
+    const { autoStart, maxFps, pixelRatio, pauseWhenHidden } = config.runtime;
+    const minimumFrameInterval = maxFps === Infinity ? 0 : 1e3 / maxFps;
     const scheduler = getScheduler();
     let renderer;
     let running = false;
     let visible = true;
     let destroyed = false;
     let elapsed = 0;
+    let staticTime = null;
     let lastTimestamp = null;
+    let lastRenderTimestamp = null;
+    let pendingDelta = 0;
     let resizeObserver = null;
     let intersectionObserver = null;
     let fallbackResizeListener = null;
     let width = 0;
     let height = 0;
+    let renderedFrames = 0;
+    let lastFrameMs = 0;
+    let totalFrameMs = 0;
+    function renderFrame(frame) {
+      const started = globalThis.performance?.now?.() ?? Date.now();
+      renderer.render(frame);
+      lastFrameMs = (globalThis.performance?.now?.() ?? Date.now()) - started;
+      totalFrameMs += lastFrameMs;
+      renderedFrames++;
+    }
     function applySize(force = false) {
       if (destroyed) return;
-      const size = measureCanvas(canvas);
+      const size = measureCanvas(canvas, pixelRatio);
       if (!force && size.width === width && size.height === height) return;
       width = size.width;
       height = size.height;
       canvas.width = width;
       canvas.height = height;
       renderer?.resize?.(width, height);
+      if (renderer && staticTime !== null && !running) {
+        renderFrame({ time: staticTime, delta: 0 });
+      }
     }
     applySize(true);
-    renderer = rendererFactory({ canvas, quality });
+    renderer = rendererFactory({ canvas, config });
     if (!renderer || typeof renderer.render !== "function") {
       throw new TypeError("A Demoscene renderer must provide render().");
     }
@@ -110,7 +253,10 @@
       start() {
         if (destroyed || running) return controller;
         running = true;
+        staticTime = null;
         lastTimestamp = null;
+        lastRenderTimestamp = null;
+        pendingDelta = 0;
         scheduler.add(controller);
         return controller;
       },
@@ -118,12 +264,36 @@
         if (!running) return controller;
         running = false;
         lastTimestamp = null;
+        lastRenderTimestamp = null;
+        pendingDelta = 0;
         scheduler.remove(controller);
         return controller;
       },
       resize() {
         applySize(true);
         return controller;
+      },
+      renderOnce(timeSeconds = 0) {
+        if (destroyed) return controller;
+        if (!Number.isFinite(timeSeconds) || timeSeconds < 0) {
+          throw new RangeError("Demoscene renderOnce time must be a non-negative number.");
+        }
+        controller.stop();
+        elapsed = timeSeconds;
+        staticTime = timeSeconds;
+        applySize(true);
+        return controller;
+      },
+      getConfig() {
+        return cloneConfig(config);
+      },
+      getStats() {
+        return {
+          backend: renderer?.getStats?.().backend ?? "canvas2d",
+          renderedFrames,
+          lastFrameMs,
+          averageFrameMs: renderedFrames ? totalFrameMs / renderedFrames : 0
+        };
       },
       destroy() {
         if (destroyed) return;
@@ -142,7 +312,7 @@
         renderer = null;
       },
       _isRunnable() {
-        return running && visible && !destroyed;
+        return running && visible && !destroyed && (typeof renderer?.isAvailable !== "function" || renderer.isAvailable());
       },
       _tick(timestamp) {
         let delta = 0;
@@ -150,10 +320,18 @@
           delta = Math.min(MAX_DELTA_SECONDS, Math.max(0, (timestamp - lastTimestamp) / 1e3));
         }
         lastTimestamp = timestamp;
-        elapsed += delta;
-        renderer.render({ time: elapsed, delta });
+        pendingDelta += delta;
+        if (lastRenderTimestamp !== null && timestamp - lastRenderTimestamp + FRAME_INTERVAL_TOLERANCE_MS < minimumFrameInterval) {
+          return;
+        }
+        lastRenderTimestamp = timestamp;
+        const renderDelta = pendingDelta;
+        pendingDelta = 0;
+        elapsed += renderDelta;
+        renderFrame({ time: elapsed, delta: renderDelta });
       }
     };
+    renderer.setWake?.(() => scheduler.wake());
     function onPointerMove(event) {
       const rect = canvas.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
@@ -172,13 +350,15 @@
       fallbackResizeListener = () => applySize();
       globalThis.addEventListener("resize", fallbackResizeListener);
     }
-    if (quality === "preview" && typeof globalThis.IntersectionObserver === "function") {
+    if (pauseWhenHidden && typeof globalThis.IntersectionObserver === "function") {
       intersectionObserver = new globalThis.IntersectionObserver((entries) => {
         const entry = entries[entries.length - 1];
         const nextVisible = Boolean(entry?.isIntersecting);
         if (visible === nextVisible) return;
         visible = nextVisible;
         lastTimestamp = null;
+        lastRenderTimestamp = null;
+        pendingDelta = 0;
         if (visible) scheduler.wake();
       });
       intersectionObserver.observe(canvas);
@@ -187,14 +367,17 @@
       canvas.addEventListener("pointermove", onPointerMove);
       canvas.addEventListener("pointerleave", onPointerLeave);
     }
-    if (options.autoStart !== false) controller.start();
+    if (autoStart) controller.start();
     return controller;
   }
 
   // src/install.js
-  function installEffect(name, rendererFactory) {
+  function installEffect(name, rendererFactory, normalizeConfig) {
     const namespace = globalThis.Demoscene && typeof globalThis.Demoscene === "object" ? globalThis.Demoscene : {};
-    namespace[name] = (target, options) => mountEffect(target, rendererFactory, options);
+    namespace[name] = (target, options) => {
+      const config = normalizeConfig(options);
+      return mountEffect(target, rendererFactory, config);
+    };
     globalThis.Demoscene = namespace;
     return namespace[name];
   }
@@ -205,72 +388,228 @@
     if (!context) throw new Error("Demoscene requires a Canvas 2D context.");
     return context;
   }
+  function createDrawingBuffer() {
+    const canvas = globalThis.document.createElement("canvas");
+    const context = getContext2D(canvas);
+    return { canvas, context, width: 1, height: 1 };
+  }
+  function resizeDrawingBuffer(buffer, width, height) {
+    buffer.width = Math.max(2, Math.floor(width));
+    buffer.height = Math.max(2, Math.floor(height));
+    buffer.canvas.width = buffer.width;
+    buffer.canvas.height = buffer.height;
+    return buffer;
+  }
+  function presentDrawingBuffer(context, buffer, width, height, smoothing) {
+    context.imageSmoothingEnabled = smoothing;
+    context.drawImage(buffer.canvas, 0, 0, width, height);
+  }
+  function packRgb(red, green, blue) {
+    return 255 << 24 | (blue | 0) << 16 | (green | 0) << 8 | (red | 0);
+  }
+  function createSeededRandom(seed) {
+    let state = seed >>> 0;
+    return () => {
+      state = state + 1831565813 | 0;
+      let value = Math.imul(state ^ state >>> 15, 1 | state);
+      value ^= value + Math.imul(value ^ value >>> 7, 61 | value);
+      return ((value ^ value >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  function samplePackedPalette(palette, normalized) {
+    const index = Math.min(
+      palette.length - 1,
+      Math.max(0, Math.round(normalized * (palette.length - 1)))
+    );
+    return palette[index];
+  }
+  function parseHexColor(value, label = "color") {
+    if (typeof value !== "string") {
+      throw new TypeError(`Demoscene ${label} must be a hex color string.`);
+    }
+    const match = value.trim().match(/^#([\da-f]{3}|[\da-f]{6})$/i);
+    if (!match) {
+      throw new TypeError(`Demoscene ${label} must use #rgb or #rrggbb.`);
+    }
+    const hex = match[1].length === 3 ? match[1].split("").map((character) => character + character).join("") : match[1];
+    return [
+      Number.parseInt(hex.slice(0, 2), 16),
+      Number.parseInt(hex.slice(2, 4), 16),
+      Number.parseInt(hex.slice(4, 6), 16)
+    ];
+  }
+  function buildGradientPalette(target, colors) {
+    if (!Array.isArray(colors) || colors.length < 2) {
+      throw new RangeError("Demoscene palette must contain at least two hex colors.");
+    }
+    const parsed = colors.map((color, index) => parseHexColor(color, `palette[${index}]`));
+    const segmentCount = parsed.length - 1;
+    for (let index = 0; index < target.length; index++) {
+      const position = index / Math.max(1, target.length - 1) * segmentCount;
+      const leftIndex = Math.min(segmentCount - 1, Math.floor(position));
+      const mix = Math.min(1, position - leftIndex);
+      const left = parsed[leftIndex];
+      const right = parsed[leftIndex + 1];
+      target[index] = packRgb(
+        Math.round(left[0] + (right[0] - left[0]) * mix),
+        Math.round(left[1] + (right[1] - left[1]) * mix),
+        Math.round(left[2] + (right[2] - left[2]) * mix)
+      );
+    }
+    return target;
+  }
   var SINE_PHASE_OFFSETS = [0, 2 * Math.PI / 3, 4 * Math.PI / 3];
 
   // src/effects/sine-scroller.js
-  var TEXT = "  GREETZ TO ALL DEMOSCENERS  ***  PLASMA  FIRE  METABALLS  TUNNEL  FRACTALS  ROTOZOOM  FEEDBACK  COPPER BARS  ***  JS DEMO PACK 2026  ***  KEEP IT REAL  ***  ";
-  function createSineScrollerRenderer({ canvas, quality }) {
-    const context = getContext2D(canvas, { alpha: false });
-    const starCount = quality === "preview" ? 40 : 220;
-    const stars = Array.from({ length: starCount }, () => ({}));
+  var DEFAULT_TEXT = "  GREETZ TO ALL DEMOSCENERS  ***  PLASMA  FIRE  METABALLS  TUNNEL  FRACTALS  ROTOZOOM  FEEDBACK  COPPER BARS  ***  JS DEMO PACK 2026  ***  KEEP IT REAL  ***  ";
+  var SINE_SCROLLER_DEFAULTS = createEffectDefaults({
+    render: { resolution: 1, smoothing: true },
+    motion: { speed: 1, scrollSpeed: 132, phaseSpeed: 3, colorCycleSpeed: 0.33 },
+    appearance: {
+      palette: ["#78a0ff", "#70f0ff", "#f080ff", "#ffe66d", "#78a0ff"],
+      colorCount: 360,
+      backgroundColor: "#04040a",
+      shadowColor: "#000000",
+      shadowAlpha: 0.6,
+      starColor: "#78a0ff"
+    },
+    text: {
+      content: DEFAULT_TEXT,
+      fontFamily: "Courier New, monospace",
+      fontWeight: 900,
+      fontSizeRatio: 0.13,
+      maxFontSize: 72,
+      characterWidthRatio: 0.62,
+      shadowOffsetX: 4,
+      shadowOffsetY: 4
+    },
+    wave: { baseline: 0.62, amplitude: 0.12, frequency: 0.018 },
+    stars: {
+      seed: 1993,
+      count: 220,
+      speed: 36,
+      minDepth: 0.2,
+      maxDepth: 2.2,
+      minSize: 0.3,
+      maxSize: 1.9,
+      minAlpha: 0.3,
+      maxAlpha: 1
+    }
+  });
+  function normalizeSineScrollerConfig(input) {
+    return normalizeEffectConfig("sineScroller", input, SINE_SCROLLER_DEFAULTS, (config) => {
+      for (const key of ["content", "fontFamily"]) assertString(config.text[key], `sineScroller.text.${key}`);
+      assertNumber(config.text.fontWeight, "sineScroller.text.fontWeight", { min: 100, max: 1e3, integer: true });
+      for (const key of ["fontSizeRatio", "maxFontSize", "characterWidthRatio"]) {
+        assertNumber(config.text[key], `sineScroller.text.${key}`, { min: Number.MIN_VALUE });
+      }
+      for (const key of ["shadowOffsetX", "shadowOffsetY"]) assertNumber(config.text[key], `sineScroller.text.${key}`);
+      assertNumber(config.wave.baseline, "sineScroller.wave.baseline", { min: 0, max: 1 });
+      assertNumber(config.wave.amplitude, "sineScroller.wave.amplitude", { min: 0, max: 1 });
+      assertNumber(config.wave.frequency, "sineScroller.wave.frequency", { min: Number.MIN_VALUE });
+      for (const key of ["scrollSpeed", "phaseSpeed", "colorCycleSpeed"]) {
+        assertNumber(config.motion[key], `sineScroller.motion.${key}`);
+      }
+      assertNumber(config.appearance.shadowAlpha, "sineScroller.appearance.shadowAlpha", { min: 0, max: 1 });
+      assertString(config.appearance.shadowColor, "sineScroller.appearance.shadowColor");
+      assertString(config.appearance.starColor, "sineScroller.appearance.starColor");
+      assertNumber(config.stars.seed, "sineScroller.stars.seed", { min: 0, max: 4294967295, integer: true });
+      assertNumber(config.stars.count, "sineScroller.stars.count", { min: 0, max: 5e3, integer: true });
+      for (const key of ["speed", "minDepth", "maxDepth", "minSize", "maxSize", "minAlpha", "maxAlpha"]) {
+        assertNumber(config.stars[key], `sineScroller.stars.${key}`, { min: 0 });
+      }
+      for (const [minimum, maximum] of [["minDepth", "maxDepth"], ["minSize", "maxSize"], ["minAlpha", "maxAlpha"]]) {
+        if (config.stars[maximum] < config.stars[minimum]) {
+          throw new RangeError(`sineScroller.stars.${maximum} must be at least ${minimum}.`);
+        }
+      }
+      if (config.stars.maxAlpha > 1) throw new RangeError("sineScroller.stars.maxAlpha must be at most 1.");
+    });
+  }
+  function createSineScrollerRenderer({ canvas, config }) {
+    const output = getContext2D(canvas, { alpha: false });
+    const buffer = createDrawingBuffer();
+    const context = buffer.context;
+    let random = createSeededRandom(config.stars.seed);
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    const stars = Array.from({ length: config.stars.count }, () => ({}));
     let width = 1;
     let height = 1;
     function resetStars() {
       for (const star of stars) {
-        star.x = Math.random() * width;
-        star.y = Math.random() * height;
-        star.z = Math.random() * 2 + 0.2;
-        star.size = Math.random() * 1.6 + 0.3;
+        star.x = random() * width;
+        star.y = random() * height;
+        star.z = config.stars.minDepth + random() * (config.stars.maxDepth - config.stars.minDepth);
+        star.size = config.stars.minSize + random() * (config.stars.maxSize - config.stars.minSize);
       }
     }
     return {
       resize(nextWidth, nextHeight) {
-        width = nextWidth;
-        height = nextHeight;
+        width = nextWidth * config.render.resolution;
+        height = nextHeight * config.render.resolution;
+        resizeDrawingBuffer(buffer, width, height);
+        random = createSeededRandom(config.stars.seed);
         resetStars();
       },
       render({ time, delta }) {
-        context.fillStyle = "#04040a";
+        context.fillStyle = config.appearance.backgroundColor;
         context.fillRect(0, 0, width, height);
         for (const star of stars) {
-          star.x -= star.z * 36 * delta;
+          star.x -= star.z * config.stars.speed * config.motion.speed * delta;
           if (star.x < 0) {
             star.x = width;
-            star.y = Math.random() * height;
+            star.y = random() * height;
           }
-          const alpha = 0.3 + star.z / 2.2 * 0.7;
-          context.fillStyle = `rgba(120,160,255,${alpha})`;
+          const depthRange = Math.max(Number.EPSILON, config.stars.maxDepth - config.stars.minDepth);
+          const normalized = (star.z - config.stars.minDepth) / depthRange;
+          const alpha = config.stars.minAlpha + normalized * (config.stars.maxAlpha - config.stars.minAlpha);
+          context.globalAlpha = alpha;
+          context.fillStyle = config.appearance.starColor;
           context.fillRect(star.x, star.y, star.size, star.size);
         }
-        const fontSize = Math.min(72, height * 0.13);
-        context.font = `900 ${fontSize}px 'Courier New', monospace`;
+        context.globalAlpha = 1;
+        const fontSize = Math.min(config.text.maxFontSize, height * config.text.fontSizeRatio);
+        context.font = `${config.text.fontWeight} ${fontSize}px ${config.text.fontFamily}`;
         context.textBaseline = "middle";
         context.textAlign = "left";
-        const baseline = height * 0.62;
-        const amplitude = height * 0.12;
-        const frequency = 0.018;
-        const characterWidth = fontSize * 0.62;
-        const totalWidth = TEXT.length * characterWidth;
-        const offset = time * 132 % totalWidth;
+        const baseline = height * config.wave.baseline;
+        const amplitude = height * config.wave.amplitude;
+        const characterWidth = fontSize * config.text.characterWidthRatio;
+        const totalWidth = config.text.content.length * characterWidth;
+        const scaledTime = time * config.motion.speed;
+        const offset = scaledTime * config.motion.scrollSpeed % totalWidth;
         const passes = Math.ceil((width + offset) / totalWidth) + 1;
-        const phase = time * 3;
+        const phase = scaledTime * config.motion.phaseSpeed;
         for (let pass = 0; pass < passes; pass++) {
           const startX = -offset + pass * totalWidth;
-          for (let index = 0; index < TEXT.length; index++) {
+          for (let index = 0; index < config.text.content.length; index++) {
             const x = startX + index * characterWidth + characterWidth / 2;
             if (x < -characterWidth || x > width + characterWidth) continue;
-            const y = baseline + Math.sin(x * frequency + phase) * amplitude;
-            const hue = (index * 18 + time * 120) % 360;
-            context.fillStyle = "rgba(0,0,0,0.6)";
-            context.fillText(TEXT[index], x - fontSize * 0.5 + 4, y + 4);
-            context.fillStyle = `hsl(${hue},100%,${62 + Math.sin(x * frequency * 2 + phase) * 12}%)`;
-            context.fillText(TEXT[index], x - fontSize * 0.5, y);
+            const y = baseline + Math.sin(x * config.wave.frequency + phase) * amplitude;
+            context.globalAlpha = config.appearance.shadowAlpha;
+            context.fillStyle = config.appearance.shadowColor;
+            context.fillText(
+              config.text.content[index],
+              x - fontSize * 0.5 + config.text.shadowOffsetX,
+              y + config.text.shadowOffsetY
+            );
+            const color = samplePackedPalette(
+              palette,
+              (index / config.text.content.length + scaledTime * config.motion.colorCycleSpeed) % 1
+            );
+            context.globalAlpha = 1;
+            context.fillStyle = `rgb(${color & 255},${color >>> 8 & 255},${color >>> 16 & 255})`;
+            context.fillText(config.text.content[index], x - fontSize * 0.5, y);
           }
         }
+        presentDrawingBuffer(output, buffer, canvas.width, canvas.height, config.render.smoothing);
       }
     };
   }
 
   // browser-entry.js
-  installEffect("sineScroller", createSineScrollerRenderer);
+  installEffect("sineScroller", createSineScrollerRenderer, normalizeSineScrollerConfig);
 })();

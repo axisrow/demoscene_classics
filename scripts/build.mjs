@@ -1,4 +1,4 @@
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -7,24 +7,24 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const outputDirectory = join(root, 'dist');
 
 const effects = [
-  ['plasma', 'createPlasmaRenderer', 'plasma.js'],
-  ['fire', 'createFireRenderer', 'fire.js'],
-  ['starfield', 'createStarfieldRenderer', 'starfield.js'],
-  ['metaballs', 'createMetaballsRenderer', 'metaballs.js'],
-  ['tunnel', 'createTunnelRenderer', 'tunnel.js'],
-  ['mandelbrot', 'createMandelbrotRenderer', 'mandelbrot.js'],
-  ['sineScroller', 'createSineScrollerRenderer', 'sine-scroller.js'],
-  ['rotozoom', 'createRotozoomRenderer', 'rotozoom.js'],
-  ['feedback', 'createFeedbackRenderer', 'feedback.js'],
-  ['copperBars', 'createCopperBarsRenderer', 'copper-bars.js']
+  ['plasma', 'createPlasmaRenderer', 'normalizePlasmaConfig', 'plasma.js'],
+  ['fire', 'createFireRenderer', 'normalizeFireConfig', 'fire.js'],
+  ['starfield', 'createStarfieldRenderer', 'normalizeStarfieldConfig', 'starfield.js'],
+  ['metaballs', 'createMetaballsRenderer', 'normalizeMetaballsConfig', 'metaballs.js'],
+  ['tunnel', 'createTunnelRenderer', 'normalizeTunnelConfig', 'tunnel.js'],
+  ['mandelbrot', 'createMandelbrotRenderer', 'normalizeMandelbrotConfig', 'mandelbrot.js'],
+  ['sineScroller', 'createSineScrollerRenderer', 'normalizeSineScrollerConfig', 'sine-scroller.js'],
+  ['rotozoom', 'createRotozoomRenderer', 'normalizeRotozoomConfig', 'rotozoom.js'],
+  ['feedback', 'createFeedbackRenderer', 'normalizeFeedbackConfig', 'feedback.js'],
+  ['copperBars', 'createCopperBarsRenderer', 'normalizeCopperBarsConfig', 'copper-bars.js']
 ];
 
 function entrySource(selectedEffects) {
-  const imports = selectedEffects.map(([name, exported, filename], index) =>
-    `import { ${exported} as effect${index} } from './src/effects/${filename}';`
+  const imports = selectedEffects.map(([name, exported, normalizer, filename], index) =>
+    `import { ${exported} as effect${index}, ${normalizer} as normalize${index} } from './src/effects/${filename}';`
   );
   const installers = selectedEffects.map(([name], index) =>
-    `installEffect('${name}', effect${index});`
+    `installEffect('${name}', effect${index}, normalize${index});`
   );
   return [
     "import { installEffect } from './src/install.js';",
@@ -56,8 +56,14 @@ await mkdir(join(outputDirectory, 'effects'), { recursive: true });
 
 await bundle(effects, join(outputDirectory, 'demoscene.js'));
 for (const effect of effects) {
-  const filename = effect[2];
+  const filename = effect[3];
   await bundle([effect], join(outputDirectory, 'effects', filename));
 }
 
-console.log(`Built ${effects.length + 1} browser scripts in dist/.`);
+const version = process.env.GITHUB_SHA || process.env.DEMOSCENE_VERSION || 'local';
+await writeFile(
+  join(outputDirectory, 'manifest.json'),
+  `${JSON.stringify({ version, apiVersion: 2, bundle: 'demoscene.js' }, null, 2)}\n`
+);
+
+console.log(`Built ${effects.length + 1} browser scripts and manifest in dist/.`);
