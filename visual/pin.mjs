@@ -18,10 +18,30 @@ export const VISUAL_DIRS = Object.freeze({
 
 // Documented, bounded screenshot tolerance. Pixel-baseline effects (Canvas 2D
 // Mandelbrot etc.) target byte-identical reproduction; vector effects target a
-// small tolerance to absorb sub-pixel rasterisation variance. Both are bounded
+// bounded tolerance to absorb cross-OS rasterisation variance. Both are bounded
 // so unconstrained differences always fail.
+//
+// Why vector effects are NOT byte-comparable across machines: starfield,
+// sineScroller, and feedback draw through the Canvas 2D stroke/fill/text APIs,
+// whose rasterisation is done by the host's Skia + font backend. That path is
+// platform-dependent (macOS CoreText vs Linux FreeType, different sub-pixel AA
+// and hinting). Pixel-buffer effects (plasma/fire/metaballs/tunnel/mandelbrot/
+// rotozoom/copperBars) write a Uint32Array directly and bypass rasterisation
+// entirely — they are byte-identical across OSes for the same chromium build.
+//
+// This was measured, not guessed: capturing the full matrix under the SAME
+// pinned chromium-1217 on macOS (arm64) and on CI Linux (x86_64) yields 0/12
+// differing bytes for every pixel-buffer effect, but for the vector effects the
+// cross-OS diff reaches ~9% (sineScroller text) and ~5% (feedback). starfield's
+// geometry happens to land byte-identical on these tiles, but it draws through
+// the same platform-dependent path, so it stays in VECTOR_EFFECTS.
+//
+// VECTOR_MAX_DIFF_PIXEL_RATIO is therefore sized with a safety margin above the
+// largest measured cross-OS variance (≈9%): 15% absorbs OS/driver/chromium-patch
+// AA drift while still bounded — a genuine vector regression (dropped scroller
+// text, blank feedback, shifted layout) diffs well above 30% and still fails.
 export const DEFAULT_MAX_DIFF_PIXEL_RATIO = 0;
-export const VECTOR_MAX_DIFF_PIXEL_RATIO = 0.01;
+export const VECTOR_MAX_DIFF_PIXEL_RATIO = 0.15;
 
 // Effects rendered with the Canvas 2D stroke/fill/text APIs (vs. raw pixel
 // buffers). These compare against a small tolerance rather than byte-identical.
