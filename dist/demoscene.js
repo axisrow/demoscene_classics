@@ -929,75 +929,6 @@
     }
   };
 
-  // src/effects/starfield/renderer.js
-  function createStarfieldRenderer({ canvas, config }) {
-    const output = getContext2D(canvas, { alpha: false });
-    const buffer = createDrawingBuffer();
-    const context = buffer.context;
-    let random = createSeededRandom(config.particles.seed);
-    const palette = buildGradientPalette(
-      new Uint32Array(config.appearance.colorCount),
-      config.appearance.palette
-    );
-    const stars = Array.from({ length: config.particles.particleCount }, () => ({}));
-    let width = 1;
-    let height = 1;
-    function spawn(star, far = false) {
-      star.x = (random() * 2 - 1) * width;
-      star.y = (random() * 2 - 1) * height;
-      star.z = far ? config.particles.depth : random() * (config.particles.depth - 1) + 1;
-      star.previousX = null;
-      star.previousY = null;
-    }
-    function resetStars() {
-      stars.forEach((star) => spawn(star));
-    }
-    return {
-      resize(nextWidth, nextHeight) {
-        width = nextWidth * config.render.resolution;
-        height = nextHeight * config.render.resolution;
-        resizeDrawingBuffer(buffer, width, height);
-        random = createSeededRandom(config.particles.seed);
-        resetStars();
-      },
-      render({ delta }) {
-        context.fillStyle = config.appearance.backgroundColor;
-        context.globalAlpha = config.particles.trailFade;
-        context.fillRect(0, 0, width, height);
-        context.globalAlpha = 1;
-        const centerX = width * config.particles.centerX;
-        const centerY = height * config.particles.centerY;
-        for (const star of stars) {
-          star.z -= config.particles.travelSpeed * config.motion.speed * delta;
-          if (star.z <= 1) {
-            spawn(star, true);
-            continue;
-          }
-          const x = star.x / star.z * config.particles.fov + centerX;
-          const y = star.y / star.z * config.particles.fov + centerY;
-          if (star.previousX !== null) {
-            const depth = 1 - star.z / config.particles.depth;
-            const intensity = depth * depth;
-            const color = samplePackedPalette(palette, intensity);
-            const red = color & 255;
-            const green = color >>> 8 & 255;
-            const blue = color >>> 16 & 255;
-            const alpha = config.particles.minAlpha + intensity * (config.particles.maxAlpha - config.particles.minAlpha);
-            context.strokeStyle = `rgba(${red},${green},${blue},${alpha})`;
-            context.lineWidth = config.particles.minLineWidth + intensity * (config.particles.maxLineWidth - config.particles.minLineWidth);
-            context.beginPath();
-            context.moveTo(star.previousX, star.previousY);
-            context.lineTo(x, y);
-            context.stroke();
-          }
-          star.previousX = x;
-          star.previousY = y;
-        }
-        presentDrawingBuffer(output, buffer, canvas.width, canvas.height, config.render.smoothing);
-      }
-    };
-  }
-
   // src/effects/starfield/config.js
   var STARFIELD_DEFAULTS = createEffectDefaults({
     render: { resolution: 1, smoothing: true },
@@ -1005,42 +936,181 @@
     appearance: {
       palette: ["#b4c8ff", "#ffffff"],
       colorCount: 256,
-      backgroundColor: "#000000"
-    },
-    particles: {
-      seed: 1993,
-      particleCount: 600,
-      fov: 256,
-      depth: 256,
-      travelSpeed: 192,
-      centerX: 0.5,
-      centerY: 0.5,
+      backgroundColor: "#000000",
+      // Trail appearance (skin-owned per issue #7). trailFade is the per-frame
+      // background alpha used to fade the previous frame's streaks; minAlpha/
+      // maxAlpha and minLineWidth/maxLineWidth map projected depth (near=bright
+      // and thick, far=dim and thin). Trails stay readable and bounded at the
+      // 1.5 s and 5 s captures without turning the background grey/white.
       trailFade: 0.35,
       minAlpha: 0.25,
       maxAlpha: 0.95,
       minLineWidth: 1,
       maxLineWidth: 3
+    },
+    particles: {
+      seed: 1993,
+      particleCount: 600,
+      // Density budget. 'explicit' honours particleCount verbatim (default).
+      // 'area' derives count = clamp(round(densityPerUnitArea * area / 1000),
+      // densityMin, densityMax) where area is the CSS viewport area; the renderer
+      // resolves this once at resize so the seed sequence stays stable.
+      densityMode: "explicit",
+      densityPerUnitArea: 0.4,
+      densityMin: 80,
+      densityMax: 1200,
+      // Projection / motion identity.
+      nearZ: 1,
+      fov: 256,
+      depth: 256,
+      travelSpeed: 192,
+      centerX: 0.5,
+      centerY: 0.5,
+      // A star is recycled when its projected position leaves the frame expanded
+      // by this many logical pixels on every side, so streaks that graze the edge
+      // are preserved but particles that have left the useful field are recycled
+      // instead of accumulating off-screen.
+      cullMargin: 8
     }
   });
   function validateStarfield(config) {
     assertNumber(config.particles.seed, "starfield.particles.seed", { min: 0, max: 4294967295, integer: true });
     assertNumber(config.particles.particleCount, "starfield.particles.particleCount", { min: 1, max: 1e4, integer: true });
+    if (!["explicit", "area"].includes(config.particles.densityMode)) {
+      throw new RangeError(`starfield.particles.densityMode must be 'explicit' or 'area'.`);
+    }
+    assertNumber(config.particles.densityPerUnitArea, "starfield.particles.densityPerUnitArea", { min: 0 });
+    assertNumber(config.particles.densityMin, "starfield.particles.densityMin", { min: 1, max: 1e4, integer: true });
+    assertNumber(config.particles.densityMax, "starfield.particles.densityMax", { min: config.particles.densityMin, integer: true });
+    assertNumber(config.particles.nearZ, "starfield.particles.nearZ", { min: Number.MIN_VALUE, max: config.particles.depth });
     for (const key of ["fov", "depth", "travelSpeed"]) {
       assertNumber(config.particles[key], `starfield.particles.${key}`, { min: Number.MIN_VALUE });
     }
-    for (const key of ["centerX", "centerY", "trailFade", "minAlpha", "maxAlpha"]) {
+    for (const key of ["centerX", "centerY"]) {
       assertNumber(config.particles[key], `starfield.particles.${key}`, { min: 0, max: 1 });
     }
-    assertNumber(config.particles.minLineWidth, "starfield.particles.minLineWidth", { min: Number.MIN_VALUE });
-    assertNumber(config.particles.maxLineWidth, "starfield.particles.maxLineWidth", { min: config.particles.minLineWidth });
-    if (config.particles.maxAlpha < config.particles.minAlpha) {
-      throw new RangeError("starfield.particles.maxAlpha must be at least minAlpha.");
+    assertNumber(config.particles.cullMargin, "starfield.particles.cullMargin", { min: 0 });
+    assertNumber(config.appearance.trailFade, "starfield.appearance.trailFade", { min: 0, max: 1 });
+    assertNumber(config.appearance.minAlpha, "starfield.appearance.minAlpha", { min: 0, max: 1 });
+    assertNumber(config.appearance.maxAlpha, "starfield.appearance.maxAlpha", { min: 0, max: 1 });
+    if (config.appearance.maxAlpha < config.appearance.minAlpha) {
+      throw new RangeError("starfield.appearance.maxAlpha must be at least minAlpha.");
     }
+    assertNumber(config.appearance.minLineWidth, "starfield.appearance.minLineWidth", { min: Number.MIN_VALUE });
+    assertNumber(config.appearance.maxLineWidth, "starfield.appearance.maxLineWidth", { min: config.appearance.minLineWidth });
+  }
+  function resolveParticleCount(particles, area) {
+    if (particles.densityMode !== "area") return particles.particleCount;
+    const derived = Math.round(particles.densityPerUnitArea * Math.max(0, area) / 1e3);
+    return Math.min(particles.densityMax, Math.max(particles.densityMin, derived));
+  }
+
+  // src/effects/starfield/renderer.js
+  function createStarfieldRenderer({ canvas, config }) {
+    const output = getContext2D(canvas, { alpha: false });
+    const buffer = createDrawingBuffer();
+    const context = buffer.context;
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    const { nearZ, fov, depth, centerX, centerY, cullMargin } = config.particles;
+    const pixelRatio = config.runtime.pixelRatio;
+    let random = createSeededRandom(config.particles.seed);
+    let stars = [];
+    let halfWidth = 1;
+    let halfHeight = 1;
+    let bufferWidth = 1;
+    let bufferHeight = 1;
+    let centerOffsetX = 0;
+    let centerOffsetY = 0;
+    let drawScale = 1;
+    function spawn(star, far = false) {
+      star.x = (random() * 2 - 1) * halfWidth;
+      star.y = (random() * 2 - 1) * halfHeight;
+      star.z = far ? depth : random() * (depth - nearZ) + nearZ;
+      star.prevZ = null;
+    }
+    function resetStars() {
+      for (const star of stars) spawn(star);
+    }
+    function resize(nextWidth, nextHeight) {
+      halfWidth = Math.max(1, nextWidth / pixelRatio);
+      halfHeight = Math.max(1, nextHeight / pixelRatio);
+      bufferWidth = nextWidth * config.render.resolution;
+      bufferHeight = nextHeight * config.render.resolution;
+      resizeDrawingBuffer(buffer, bufferWidth, bufferHeight);
+      centerOffsetX = halfWidth * centerX;
+      centerOffsetY = halfHeight * centerY;
+      drawScale = config.render.resolution * pixelRatio;
+      const count = resolveParticleCount(config.particles, halfWidth * halfHeight);
+      if (count !== stars.length) {
+        stars = Array.from({ length: count }, () => ({}));
+      }
+      random = createSeededRandom(config.particles.seed);
+      resetStars();
+    }
+    return {
+      resize,
+      render({ delta }) {
+        context.fillStyle = config.appearance.backgroundColor;
+        context.globalAlpha = config.appearance.trailFade;
+        context.fillRect(0, 0, bufferWidth, bufferHeight);
+        context.globalAlpha = 1;
+        const advance = config.particles.travelSpeed * config.motion.speed * delta;
+        const maxX = halfWidth + cullMargin;
+        const maxY = halfHeight + cullMargin;
+        const minX = -cullMargin;
+        const minY = -cullMargin;
+        for (const star of stars) {
+          star.z -= advance;
+          if (!Number.isFinite(star.z) || star.z <= nearZ) {
+            spawn(star, true);
+            continue;
+          }
+          const px = star.x / star.z * fov + centerOffsetX;
+          const py = star.y / star.z * fov + centerOffsetY;
+          if (px < minX || px > maxX || py < minY || py > maxY) {
+            spawn(star, true);
+            continue;
+          }
+          if (star.prevZ !== null) {
+            const prevPx = star.x / star.prevZ * fov + centerOffsetX;
+            const prevPy = star.y / star.prevZ * fov + centerOffsetY;
+            const depthFactor = 1 - star.z / depth;
+            const intensity = depthFactor * depthFactor;
+            const color = samplePackedPalette(palette, intensity);
+            const red = color & 255;
+            const green = color >>> 8 & 255;
+            const blue = color >>> 16 & 255;
+            const alpha = config.appearance.minAlpha + intensity * (config.appearance.maxAlpha - config.appearance.minAlpha);
+            context.strokeStyle = `rgba(${red},${green},${blue},${alpha})`;
+            context.lineWidth = config.appearance.minLineWidth + intensity * (config.appearance.maxLineWidth - config.appearance.minLineWidth);
+            context.beginPath();
+            context.moveTo(prevPx * drawScale, prevPy * drawScale);
+            context.lineTo(px * drawScale, py * drawScale);
+            context.stroke();
+          }
+          star.prevZ = star.z;
+        }
+        presentDrawingBuffer(output, buffer, canvas.width, canvas.height, config.render.smoothing);
+      }
+    };
   }
 
   // src/effects/starfield/skins.js
   var STARFIELD_SKINS = Object.freeze({
-    classic: Object.freeze({})
+    classic: Object.freeze({
+      appearance: Object.freeze({
+        backgroundColor: "#000000",
+        palette: Object.freeze(["#b4c8ff", "#ffffff"]),
+        trailFade: 0.35,
+        minAlpha: 0.25,
+        maxAlpha: 0.95,
+        minLineWidth: 1,
+        maxLineWidth: 3
+      })
+    })
   });
 
   // src/effects/starfield/profiles.js
@@ -1048,12 +1118,25 @@
   var RUNTIME_FULLSCREEN_MOBILE3 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP3 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE3 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_BUDGET = { render: { resolution: 0.7 }, particles: { particleCount: 120 } };
+  var FULLSCREEN_DESKTOP_BUDGET = {
+    particles: { densityMode: "explicit", particleCount: 600 }
+  };
+  var FULLSCREEN_MOBILE_BUDGET = {
+    particles: { densityMode: "area", densityPerUnitArea: 0.55, densityMin: 200, densityMax: 450 }
+  };
+  var PREVIEW_DESKTOP_BUDGET = {
+    render: { resolution: 0.7 },
+    particles: { densityMode: "explicit", particleCount: 120 }
+  };
+  var PREVIEW_MOBILE_BUDGET = {
+    render: { resolution: 0.7 },
+    particles: { densityMode: "explicit", particleCount: 90 }
+  };
   var STARFIELD_PROFILES = buildProfiles({
-    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP3 },
-    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE3 },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP3, ...PREVIEW_BUDGET },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE3, ...PREVIEW_BUDGET }
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP3, ...FULLSCREEN_DESKTOP_BUDGET },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE3, ...FULLSCREEN_MOBILE_BUDGET },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP3, ...PREVIEW_DESKTOP_BUDGET },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE3, ...PREVIEW_MOBILE_BUDGET }
   });
 
   // src/effects/starfield/index.js
@@ -1205,12 +1288,12 @@
   var RUNTIME_FULLSCREEN_MOBILE4 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP4 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE4 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_BUDGET2 = { render: { resolution: 0.2 }, field: { pointCount: 3 } };
+  var PREVIEW_BUDGET = { render: { resolution: 0.2 }, field: { pointCount: 3 } };
   var METABALLS_PROFILES = buildProfiles({
     "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP4 },
     "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE4 },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP4, ...PREVIEW_BUDGET2 },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE4, ...PREVIEW_BUDGET2 }
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP4, ...PREVIEW_BUDGET },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE4, ...PREVIEW_BUDGET }
   });
 
   // src/effects/metaballs/index.js
@@ -2132,12 +2215,12 @@ void main() {
   var RUNTIME_FULLSCREEN_MOBILE7 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP7 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE7 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_BUDGET3 = { render: { resolution: 0.7 }, stars: { count: 60 } };
+  var PREVIEW_BUDGET2 = { render: { resolution: 0.7 }, stars: { count: 60 } };
   var SINE_SCROLLER_PROFILES = buildProfiles({
     "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP7 },
     "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE7 },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP7, ...PREVIEW_BUDGET3 },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE7, ...PREVIEW_BUDGET3 }
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP7, ...PREVIEW_BUDGET2 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE7, ...PREVIEW_BUDGET2 }
   });
 
   // src/effects/sine-scroller/index.js
