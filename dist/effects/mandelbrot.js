@@ -15,6 +15,18 @@
     else if (isPlainObject(value)) Object.values(value).forEach(freezeValue);
     return value !== null && typeof value === "object" ? Object.freeze(value) : value;
   }
+  function mergeValue(defaultValue, inputValue) {
+    if (inputValue === void 0) return cloneValue(defaultValue);
+    if (isPlainObject(defaultValue) && isPlainObject(inputValue)) {
+      const result = {};
+      const keys = /* @__PURE__ */ new Set([...Object.keys(defaultValue), ...Object.keys(inputValue)]);
+      for (const key of keys) {
+        result[key] = mergeValue(defaultValue[key], inputValue[key]);
+      }
+      return result;
+    }
+    return cloneValue(inputValue);
+  }
   function assertKnownKeys(effectName, input, defaults, path = effectName) {
     if (!isPlainObject(input)) throw new TypeError(`${path} must be an object.`);
     for (const [key, value] of Object.entries(input)) {
@@ -31,18 +43,6 @@
         ));
       }
     }
-  }
-  function mergeValue(defaultValue, inputValue) {
-    if (inputValue === void 0) return cloneValue(defaultValue);
-    if (isPlainObject(defaultValue) && isPlainObject(inputValue)) {
-      const result = {};
-      const keys = /* @__PURE__ */ new Set([...Object.keys(defaultValue), ...Object.keys(inputValue)]);
-      for (const key of keys) {
-        result[key] = mergeValue(defaultValue[key], inputValue[key]);
-      }
-      return result;
-    }
-    return cloneValue(inputValue);
   }
   function assertNumber(value, path, { min = -Infinity, max = Infinity, integer = false } = {}) {
     if (!Number.isFinite(value) || value < min || value > max || integer && !Number.isInteger(value)) {
@@ -85,15 +85,6 @@
     assertNumber(motion.speed, `${effectName}.motion.speed`, { min: Number.MIN_VALUE });
     assertPalette(appearance.palette, `${effectName}.appearance.palette`, appearance.colorCount);
     assertString(appearance.backgroundColor, `${effectName}.appearance.backgroundColor`);
-  }
-  function normalizeEffectConfig(effectName, input, defaults, validate = () => {
-  }) {
-    const supplied = input === void 0 ? {} : input;
-    assertKnownKeys(effectName, supplied, defaults);
-    const config = mergeValue(defaults, supplied);
-    validateCommonConfig(effectName, config);
-    validate(config);
-    return freezeValue(config);
   }
   function cloneConfig(config) {
     return cloneValue(config);
@@ -201,7 +192,7 @@
     }
     return globalThis[RUNTIME_KEY];
   }
-  function mountEffect(target, rendererFactory, config) {
+  function mountEffect(target, rendererFactory, config, selection = null) {
     const canvas = resolveCanvas(target);
     const { autoStart, maxFps, pixelRatio, pauseWhenHidden } = config.runtime;
     const minimumFrameInterval = maxFps === Infinity ? 0 : 1e3 / maxFps;
@@ -285,7 +276,10 @@
         return controller;
       },
       getConfig() {
-        return cloneConfig(config);
+        return freezeValue(cloneConfig(config));
+      },
+      getSelection() {
+        return selection;
       },
       getStats() {
         return {
@@ -371,18 +365,171 @@
     return controller;
   }
 
+  // src/resolver.js
+  var DESCRIPTOR_KEYS = /* @__PURE__ */ new Set(["skin", "surface", "device", "config"]);
+  var V2_GROUPS = /* @__PURE__ */ new Set([
+    "runtime",
+    "render",
+    "motion",
+    "appearance",
+    "field",
+    "simulation",
+    "particles",
+    "geometry",
+    "camera",
+    "algorithm",
+    "texture",
+    "feedback",
+    "bars",
+    "shading",
+    "text",
+    "wave",
+    "stars"
+  ]);
+  var VALID_DEVICES = ["auto", "desktop", "mobile"];
+  function detectLegacy(name, input) {
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError(`${name}: descriptor must be an object.`);
+    }
+    for (const key of Object.keys(input)) {
+      if (V2_GROUPS.has(key)) {
+        throw new TypeError(
+          `${name}: the legacy v2 flat options object is no longer supported in API v3. Move '${key}' under the config escape hatch, e.g. Demoscene.${name}(canvas, { skin: 'classic', surface: 'fullscreen', device: 'auto', config: { ${key}: ... } }). See the API v3 migration guide.`
+        );
+      }
+      if (!DESCRIPTOR_KEYS.has(key)) {
+        throw new RangeError(`Unknown descriptor field: ${name}.${key}`);
+      }
+    }
+  }
+  function resolveSkin(name, skinField, skins) {
+    if (skinField === void 0 || skinField === null) {
+      return { requested: "classic", presetName: "classic", overrides: {} };
+    }
+    if (typeof skinField === "string") {
+      if (!(skinField in skins)) {
+        throw new RangeError(`${name}: unknown skin '${skinField}'. Known skins: ${Object.keys(skins).join(", ")}.`);
+      }
+      return { requested: skinField, presetName: skinField, overrides: {} };
+    }
+    if (isPlainObject(skinField)) {
+      for (const key of Object.keys(skinField)) {
+        if (key !== "preset" && key !== "overrides") {
+          throw new RangeError(`Unknown skin field: ${name}.skin.${key} (use 'preset' and/or 'overrides').`);
+        }
+      }
+      const presetName = skinField.preset ?? "classic";
+      if (typeof presetName !== "string" || !(presetName in skins)) {
+        throw new RangeError(`${name}: unknown skin preset '${String(presetName)}'. Known skins: ${Object.keys(skins).join(", ")}.`);
+      }
+      const overrides = skinField.overrides ?? {};
+      if (!isPlainObject(overrides)) {
+        throw new TypeError(`${name}.skin.overrides must be an object.`);
+      }
+      return { requested: skinField, presetName, overrides };
+    }
+    throw new TypeError(`${name}.skin must be a string or { preset, overrides }.`);
+  }
+  function resolveSurface(name, surfaceField, surfaces) {
+    const surfaceName = surfaceField ?? "fullscreen";
+    if (typeof surfaceName !== "string" || !(surfaceName in surfaces)) {
+      throw new RangeError(`${name}: unknown surface '${String(surfaceName)}'. Known surfaces: ${Object.keys(surfaces).join(", ")}.`);
+    }
+    return surfaceName;
+  }
+  function detectDevice(requestedDevice) {
+    if (requestedDevice !== "auto") return requestedDevice;
+    const matchMedia = globalThis.matchMedia;
+    if (typeof matchMedia !== "function") return "desktop";
+    try {
+      const narrow = matchMedia("(max-width: 767px)");
+      const coarse = matchMedia("(hover: none) and (pointer: coarse)");
+      const isMobile = Boolean(narrow?.matches) || Boolean(coarse?.matches);
+      return isMobile ? "mobile" : "desktop";
+    } catch {
+      return "desktop";
+    }
+  }
+  function resolveDevice(name, deviceField, devices) {
+    const requestedDevice = deviceField ?? "auto";
+    if (!VALID_DEVICES.includes(requestedDevice)) {
+      throw new RangeError(`${name}: unknown device '${String(requestedDevice)}'. Known devices: ${VALID_DEVICES.join(", ")}.`);
+    }
+    const resolvedDevice = detectDevice(requestedDevice);
+    if (!(resolvedDevice in devices)) {
+      throw new RangeError(`${name}: unknown resolved device '${resolvedDevice}'.`);
+    }
+    return { requestedDevice, resolvedDevice };
+  }
+  function assertSkinPaths(name, label, overlay, allow) {
+    if (!isPlainObject(overlay)) return;
+    for (const key of Object.keys(overlay)) {
+      if (!allow.has(key)) {
+        throw new RangeError(
+          `${name}: skin ${label} is out of scope at '${key}'. Skins may only touch: ${[...allow].join(", ")}. To override an algorithmic field, pass it under 'config' instead.`
+        );
+      }
+    }
+  }
+  function resolveDescriptor(definition, descriptor) {
+    const {
+      name,
+      configDefaults,
+      validate = () => {
+      },
+      skins,
+      profiles,
+      capabilities
+    } = definition;
+    const input = descriptor === void 0 ? {} : descriptor;
+    detectLegacy(name, input);
+    const { requested, presetName, overrides } = resolveSkin(name, input.skin, skins);
+    const preset = skins[presetName] ?? {};
+    const surfaceName = resolveSurface(name, input.surface, profiles.surfaces);
+    const surfaceProfile = profiles.surfaces[surfaceName] ?? {};
+    const { requestedDevice, resolvedDevice } = resolveDevice(name, input.device, profiles.devices);
+    const deviceProfile = profiles.devices[resolvedDevice] ?? {};
+    const explicit = input.config ?? {};
+    if (!isPlainObject(explicit)) {
+      throw new TypeError(`${name}.config must be an object.`);
+    }
+    const allow = capabilities?.skinAllow ?? /* @__PURE__ */ new Set();
+    assertSkinPaths(name, `preset '${presetName}'`, preset, allow);
+    assertSkinPaths(name, "overrides", overrides, allow);
+    assertKnownKeys(name, explicit, configDefaults);
+    definition.validateInput?.(name, explicit);
+    let config = cloneValue(configDefaults);
+    config = mergeValue(config, preset);
+    config = mergeValue(config, overrides);
+    config = mergeValue(config, surfaceProfile);
+    config = mergeValue(config, deviceProfile);
+    config = mergeValue(config, explicit);
+    validateCommonConfig(name, config);
+    validate(config);
+    config = freezeValue(config);
+    const selection = Object.freeze({
+      requestedSkin: requested,
+      preset: presetName,
+      surface: surfaceName,
+      requestedDevice,
+      resolvedDevice
+    });
+    return { config, selection };
+  }
+
   // src/install.js
-  function installEffect(name, rendererFactory, normalizeConfig) {
+  function installEffect(definition) {
+    const { name } = definition;
     const namespace = globalThis.Demoscene && typeof globalThis.Demoscene === "object" ? globalThis.Demoscene : {};
-    namespace[name] = (target, options) => {
-      const config = normalizeConfig(options);
-      return mountEffect(target, rendererFactory, config);
+    namespace[name] = (target, descriptor) => {
+      const { config, selection } = resolveDescriptor(definition, descriptor);
+      return mountEffect(target, definition.rendererFactory, config, selection);
     };
     globalThis.Demoscene = namespace;
     return namespace[name];
   }
 
-  // src/effects/mandelbrot-core.js
+  // src/effects/mandelbrot/mandelbrot-core.js
   function mandelbrotZoom(time, {
     minZoom,
     maxZoom,
@@ -530,7 +677,7 @@
   }
   var SINE_PHASE_OFFSETS = [0, 2 * Math.PI / 3, 4 * Math.PI / 3];
 
-  // src/effects/mandelbrot-webgl.js
+  // src/effects/mandelbrot/mandelbrot-webgl.js
   var VERTEX_SHADER = `#version 300 es
 const vec2 POSITIONS[3] = vec2[3](
   vec2(-1.0, -1.0),
@@ -934,71 +1081,8 @@ void main() {
     };
   }
 
-  // src/effects/mandelbrot.js
+  // src/effects/mandelbrot/renderer.js
   var MANDELBROT_INTERIOR_COLOR = packRgb(0, 0, 0);
-  var MANDELBROT_DEFAULTS = createEffectDefaults({
-    render: { backend: "canvas2d", resolution: 0.2, smoothing: false },
-    motion: { speed: 1, cycleSeconds: 28, startPhase: 0 },
-    appearance: {
-      palette: [
-        "#80ed12",
-        "#bfbf01",
-        "#ed8012",
-        "#ff4040",
-        "#ed127f",
-        "#bf01bf",
-        "#8012ed",
-        "#4040ff",
-        "#127fed",
-        "#01bfbf",
-        "#12ed80",
-        "#40ff40",
-        "#7fed12"
-      ],
-      colorCount: 1024,
-      backgroundColor: "#000000",
-      interiorColor: "#000000"
-    },
-    camera: {
-      centerX: -0.7436438870371587,
-      centerY: 0.1318259042053119,
-      minZoom: 1,
-      maxZoom: 1e6
-    },
-    algorithm: {
-      iterationBase: 80,
-      iterationGrowth: 60,
-      maxIterations: null,
-      escapeRadius: 16
-    }
-  });
-  function normalizeMandelbrotConfig(input) {
-    return normalizeEffectConfig("mandelbrot", input, MANDELBROT_DEFAULTS, (config) => {
-      assertString(config.render.backend, "mandelbrot.render.backend");
-      if (!["auto", "webgl2", "canvas2d"].includes(config.render.backend)) {
-        throw new RangeError("mandelbrot.render.backend must be auto, webgl2 or canvas2d.");
-      }
-      assertNumber(config.motion.cycleSeconds, "mandelbrot.motion.cycleSeconds", { min: Number.MIN_VALUE });
-      assertNumber(config.motion.startPhase, "mandelbrot.motion.startPhase", { min: 0, max: 1 });
-      for (const key of ["centerX", "centerY"]) {
-        assertNumber(config.camera[key], `mandelbrot.camera.${key}`);
-      }
-      assertNumber(config.camera.minZoom, "mandelbrot.camera.minZoom", { min: Number.MIN_VALUE });
-      assertNumber(config.camera.maxZoom, "mandelbrot.camera.maxZoom", {
-        min: config.camera.minZoom + Number.EPSILON
-      });
-      assertNumber(config.algorithm.iterationBase, "mandelbrot.algorithm.iterationBase", { min: 1 });
-      assertNumber(config.algorithm.iterationGrowth, "mandelbrot.algorithm.iterationGrowth", { min: 0 });
-      if (config.algorithm.maxIterations !== null) {
-        assertNumber(config.algorithm.maxIterations, "mandelbrot.algorithm.maxIterations", {
-          min: 1,
-          max: 1e4,
-          integer: true
-        });
-      }
-      assertNumber(config.algorithm.escapeRadius, "mandelbrot.algorithm.escapeRadius", { min: 2 });
-    });
-  }
   function createMandelbrotCanvas2DRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
@@ -1047,6 +1131,101 @@ void main() {
     return createMandelbrotCanvas2DRenderer({ canvas, config });
   }
 
+  // src/effects/mandelbrot/config.js
+  var MANDELBROT_DEFAULTS = createEffectDefaults({
+    render: { backend: "canvas2d", resolution: 0.2, smoothing: false },
+    motion: { speed: 1, cycleSeconds: 28, startPhase: 0 },
+    appearance: {
+      palette: [
+        "#80ed12",
+        "#bfbf01",
+        "#ed8012",
+        "#ff4040",
+        "#ed127f",
+        "#bf01bf",
+        "#8012ed",
+        "#4040ff",
+        "#127fed",
+        "#01bfbf",
+        "#12ed80",
+        "#40ff40",
+        "#7fed12"
+      ],
+      colorCount: 1024,
+      backgroundColor: "#000000",
+      interiorColor: "#000000"
+    },
+    camera: {
+      centerX: -0.7436438870371587,
+      centerY: 0.1318259042053119,
+      minZoom: 1,
+      maxZoom: 1e6
+    },
+    algorithm: {
+      iterationBase: 80,
+      iterationGrowth: 60,
+      maxIterations: null,
+      escapeRadius: 16
+    }
+  });
+  function validateMandelbrot(config) {
+    assertString(config.render.backend, "mandelbrot.render.backend");
+    if (!["auto", "webgl2", "canvas2d"].includes(config.render.backend)) {
+      throw new RangeError("mandelbrot.render.backend must be auto, webgl2 or canvas2d.");
+    }
+    assertNumber(config.motion.cycleSeconds, "mandelbrot.motion.cycleSeconds", { min: Number.MIN_VALUE });
+    assertNumber(config.motion.startPhase, "mandelbrot.motion.startPhase", { min: 0, max: 1 });
+    for (const key of ["centerX", "centerY"]) {
+      assertNumber(config.camera[key], `mandelbrot.camera.${key}`);
+    }
+    assertNumber(config.camera.minZoom, "mandelbrot.camera.minZoom", { min: Number.MIN_VALUE });
+    assertNumber(config.camera.maxZoom, "mandelbrot.camera.maxZoom", {
+      min: config.camera.minZoom + Number.EPSILON
+    });
+    assertNumber(config.algorithm.iterationBase, "mandelbrot.algorithm.iterationBase", { min: 1 });
+    assertNumber(config.algorithm.iterationGrowth, "mandelbrot.algorithm.iterationGrowth", { min: 0 });
+    if (config.algorithm.maxIterations !== null) {
+      assertNumber(config.algorithm.maxIterations, "mandelbrot.algorithm.maxIterations", {
+        min: 1,
+        max: 1e4,
+        integer: true
+      });
+    }
+    assertNumber(config.algorithm.escapeRadius, "mandelbrot.algorithm.escapeRadius", { min: 2 });
+  }
+
+  // src/effects/mandelbrot/skins.js
+  var MANDELBROT_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/mandelbrot/profiles.js
+  var MANDELBROT_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/mandelbrot/index.js
+  var mandelbrotDefinition = {
+    name: "mandelbrot",
+    rendererFactory: createMandelbrotRenderer,
+    configDefaults: MANDELBROT_DEFAULTS,
+    validate: validateMandelbrot,
+    skins: MANDELBROT_SKINS,
+    profiles: MANDELBROT_PROFILES,
+    capabilities: {
+      // Skins change presentation only. The fractal *camera* target and the
+      // escape-time *algorithm* are algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
+
   // browser-entry.js
-  installEffect("mandelbrot", createMandelbrotRenderer, normalizeMandelbrotConfig);
+  installEffect(mandelbrotDefinition);
 })();

@@ -1,4 +1,4 @@
-import { cloneConfig } from './config.js';
+import { cloneConfig, freezeValue } from './config.js';
 
 const RUNTIME_KEY = Symbol.for('demoscene-classics.runtime');
 const MAX_DELTA_SECONDS = 0.05;
@@ -197,7 +197,10 @@ export function mountEffect(target, rendererFactory, config, selection = null) {
       return controller;
     },
     getConfig() {
-      return cloneConfig(config);
+      // Return a fresh, deeply frozen clone so callers receive the fully
+      // resolved v3 configuration (frozen per the API contract) without ever
+      // holding a reference to the live internal config object.
+      return freezeValue(cloneConfig(config));
     },
     getSelection() {
       return selection;

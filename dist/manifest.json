@@ -1,5 +1,147 @@
 {
   "version": "local",
-  "apiVersion": 2,
-  "bundle": "demoscene.js"
+  "apiVersion": 3,
+  "bundle": "demoscene.js",
+  "effects": [
+    {
+      "name": "plasma",
+      "skins": [
+        "classic"
+      ],
+      "surfaces": [
+        "fullscreen",
+        "preview"
+      ],
+      "devices": [
+        "desktop",
+        "mobile"
+      ]
+    },
+    {
+      "name": "fire",
+      "skins": [
+        "classic"
+      ],
+      "surfaces": [
+        "fullscreen",
+        "preview"
+      ],
+      "devices": [
+        "desktop",
+        "mobile"
+      ]
+    },
+    {
+      "name": "starfield",
+      "skins": [
+        "classic"
+      ],
+      "surfaces": [
+        "fullscreen",
+        "preview"
+      ],
+      "devices": [
+        "desktop",
+        "mobile"
+      ]
+    },
+    {
+      "name": "metaballs",
+      "skins": [
+        "classic"
+      ],
+      "surfaces": [
+        "fullscreen",
+        "preview"
+      ],
+      "devices": [
+        "desktop",
+        "mobile"
+      ]
+    },
+    {
+      "name": "tunnel",
+      "skins": [
+        "classic"
+      ],
+      "surfaces": [
+        "fullscreen",
+        "preview"
+      ],
+      "devices": [
+        "desktop",
+        "mobile"
+      ]
+    },
+    {
+      "name": "mandelbrot",
+      "skins": [
+        "classic"
+      ],
+      "surfaces": [
+        "fullscreen",
+        "preview"
+      ],
+      "devices": [
+        "desktop",
+        "mobile"
+      ]
+    },
+    {
+      "name": "sineScroller",
+      "skins": [
+        "classic"
+      ],
+      "surfaces": [
+        "fullscreen",
+        "preview"
+      ],
+      "devices": [
+        "desktop",
+        "mobile"
+      ]
+    },
+    {
+      "name": "rotozoom",
+      "skins": [
+        "classic"
+      ],
+      "surfaces": [
+        "fullscreen",
+        "preview"
+      ],
+      "devices": [
+        "desktop",
+        "mobile"
+      ]
+    },
+    {
+      "name": "feedback",
+      "skins": [
+        "classic"
+      ],
+      "surfaces": [
+        "fullscreen",
+        "preview"
+      ],
+      "devices": [
+        "desktop",
+        "mobile"
+      ]
+    },
+    {
+      "name": "copperBars",
+      "skins": [
+        "classic"
+      ],
+      "surfaces": [
+        "fullscreen",
+        "preview"
+      ],
+      "devices": [
+        "desktop",
+        "mobile"
+      ]
+    }
+  ]
 }

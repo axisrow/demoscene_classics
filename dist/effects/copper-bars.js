@@ -15,6 +15,18 @@
     else if (isPlainObject(value)) Object.values(value).forEach(freezeValue);
     return value !== null && typeof value === "object" ? Object.freeze(value) : value;
   }
+  function mergeValue(defaultValue, inputValue) {
+    if (inputValue === void 0) return cloneValue(defaultValue);
+    if (isPlainObject(defaultValue) && isPlainObject(inputValue)) {
+      const result = {};
+      const keys = /* @__PURE__ */ new Set([...Object.keys(defaultValue), ...Object.keys(inputValue)]);
+      for (const key of keys) {
+        result[key] = mergeValue(defaultValue[key], inputValue[key]);
+      }
+      return result;
+    }
+    return cloneValue(inputValue);
+  }
   function assertKnownKeys(effectName, input, defaults, path = effectName) {
     if (!isPlainObject(input)) throw new TypeError(`${path} must be an object.`);
     for (const [key, value] of Object.entries(input)) {
@@ -31,18 +43,6 @@
         ));
       }
     }
-  }
-  function mergeValue(defaultValue, inputValue) {
-    if (inputValue === void 0) return cloneValue(defaultValue);
-    if (isPlainObject(defaultValue) && isPlainObject(inputValue)) {
-      const result = {};
-      const keys = /* @__PURE__ */ new Set([...Object.keys(defaultValue), ...Object.keys(inputValue)]);
-      for (const key of keys) {
-        result[key] = mergeValue(defaultValue[key], inputValue[key]);
-      }
-      return result;
-    }
-    return cloneValue(inputValue);
   }
   function assertNumber(value, path, { min = -Infinity, max = Infinity, integer = false } = {}) {
     if (!Number.isFinite(value) || value < min || value > max || integer && !Number.isInteger(value)) {
@@ -85,15 +85,6 @@
     assertNumber(motion.speed, `${effectName}.motion.speed`, { min: Number.MIN_VALUE });
     assertPalette(appearance.palette, `${effectName}.appearance.palette`, appearance.colorCount);
     assertString(appearance.backgroundColor, `${effectName}.appearance.backgroundColor`);
-  }
-  function normalizeEffectConfig(effectName, input, defaults, validate = () => {
-  }) {
-    const supplied = input === void 0 ? {} : input;
-    assertKnownKeys(effectName, supplied, defaults);
-    const config = mergeValue(defaults, supplied);
-    validateCommonConfig(effectName, config);
-    validate(config);
-    return freezeValue(config);
   }
   function cloneConfig(config) {
     return cloneValue(config);
@@ -201,7 +192,7 @@
     }
     return globalThis[RUNTIME_KEY];
   }
-  function mountEffect(target, rendererFactory, config) {
+  function mountEffect(target, rendererFactory, config, selection = null) {
     const canvas = resolveCanvas(target);
     const { autoStart, maxFps, pixelRatio, pauseWhenHidden } = config.runtime;
     const minimumFrameInterval = maxFps === Infinity ? 0 : 1e3 / maxFps;
@@ -285,7 +276,10 @@
         return controller;
       },
       getConfig() {
-        return cloneConfig(config);
+        return freezeValue(cloneConfig(config));
+      },
+      getSelection() {
+        return selection;
       },
       getStats() {
         return {
@@ -371,12 +365,165 @@
     return controller;
   }
 
+  // src/resolver.js
+  var DESCRIPTOR_KEYS = /* @__PURE__ */ new Set(["skin", "surface", "device", "config"]);
+  var V2_GROUPS = /* @__PURE__ */ new Set([
+    "runtime",
+    "render",
+    "motion",
+    "appearance",
+    "field",
+    "simulation",
+    "particles",
+    "geometry",
+    "camera",
+    "algorithm",
+    "texture",
+    "feedback",
+    "bars",
+    "shading",
+    "text",
+    "wave",
+    "stars"
+  ]);
+  var VALID_DEVICES = ["auto", "desktop", "mobile"];
+  function detectLegacy(name, input) {
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError(`${name}: descriptor must be an object.`);
+    }
+    for (const key of Object.keys(input)) {
+      if (V2_GROUPS.has(key)) {
+        throw new TypeError(
+          `${name}: the legacy v2 flat options object is no longer supported in API v3. Move '${key}' under the config escape hatch, e.g. Demoscene.${name}(canvas, { skin: 'classic', surface: 'fullscreen', device: 'auto', config: { ${key}: ... } }). See the API v3 migration guide.`
+        );
+      }
+      if (!DESCRIPTOR_KEYS.has(key)) {
+        throw new RangeError(`Unknown descriptor field: ${name}.${key}`);
+      }
+    }
+  }
+  function resolveSkin(name, skinField, skins) {
+    if (skinField === void 0 || skinField === null) {
+      return { requested: "classic", presetName: "classic", overrides: {} };
+    }
+    if (typeof skinField === "string") {
+      if (!(skinField in skins)) {
+        throw new RangeError(`${name}: unknown skin '${skinField}'. Known skins: ${Object.keys(skins).join(", ")}.`);
+      }
+      return { requested: skinField, presetName: skinField, overrides: {} };
+    }
+    if (isPlainObject(skinField)) {
+      for (const key of Object.keys(skinField)) {
+        if (key !== "preset" && key !== "overrides") {
+          throw new RangeError(`Unknown skin field: ${name}.skin.${key} (use 'preset' and/or 'overrides').`);
+        }
+      }
+      const presetName = skinField.preset ?? "classic";
+      if (typeof presetName !== "string" || !(presetName in skins)) {
+        throw new RangeError(`${name}: unknown skin preset '${String(presetName)}'. Known skins: ${Object.keys(skins).join(", ")}.`);
+      }
+      const overrides = skinField.overrides ?? {};
+      if (!isPlainObject(overrides)) {
+        throw new TypeError(`${name}.skin.overrides must be an object.`);
+      }
+      return { requested: skinField, presetName, overrides };
+    }
+    throw new TypeError(`${name}.skin must be a string or { preset, overrides }.`);
+  }
+  function resolveSurface(name, surfaceField, surfaces) {
+    const surfaceName = surfaceField ?? "fullscreen";
+    if (typeof surfaceName !== "string" || !(surfaceName in surfaces)) {
+      throw new RangeError(`${name}: unknown surface '${String(surfaceName)}'. Known surfaces: ${Object.keys(surfaces).join(", ")}.`);
+    }
+    return surfaceName;
+  }
+  function detectDevice(requestedDevice) {
+    if (requestedDevice !== "auto") return requestedDevice;
+    const matchMedia = globalThis.matchMedia;
+    if (typeof matchMedia !== "function") return "desktop";
+    try {
+      const narrow = matchMedia("(max-width: 767px)");
+      const coarse = matchMedia("(hover: none) and (pointer: coarse)");
+      const isMobile = Boolean(narrow?.matches) || Boolean(coarse?.matches);
+      return isMobile ? "mobile" : "desktop";
+    } catch {
+      return "desktop";
+    }
+  }
+  function resolveDevice(name, deviceField, devices) {
+    const requestedDevice = deviceField ?? "auto";
+    if (!VALID_DEVICES.includes(requestedDevice)) {
+      throw new RangeError(`${name}: unknown device '${String(requestedDevice)}'. Known devices: ${VALID_DEVICES.join(", ")}.`);
+    }
+    const resolvedDevice = detectDevice(requestedDevice);
+    if (!(resolvedDevice in devices)) {
+      throw new RangeError(`${name}: unknown resolved device '${resolvedDevice}'.`);
+    }
+    return { requestedDevice, resolvedDevice };
+  }
+  function assertSkinPaths(name, label, overlay, allow) {
+    if (!isPlainObject(overlay)) return;
+    for (const key of Object.keys(overlay)) {
+      if (!allow.has(key)) {
+        throw new RangeError(
+          `${name}: skin ${label} is out of scope at '${key}'. Skins may only touch: ${[...allow].join(", ")}. To override an algorithmic field, pass it under 'config' instead.`
+        );
+      }
+    }
+  }
+  function resolveDescriptor(definition, descriptor) {
+    const {
+      name,
+      configDefaults,
+      validate = () => {
+      },
+      skins,
+      profiles,
+      capabilities
+    } = definition;
+    const input = descriptor === void 0 ? {} : descriptor;
+    detectLegacy(name, input);
+    const { requested, presetName, overrides } = resolveSkin(name, input.skin, skins);
+    const preset = skins[presetName] ?? {};
+    const surfaceName = resolveSurface(name, input.surface, profiles.surfaces);
+    const surfaceProfile = profiles.surfaces[surfaceName] ?? {};
+    const { requestedDevice, resolvedDevice } = resolveDevice(name, input.device, profiles.devices);
+    const deviceProfile = profiles.devices[resolvedDevice] ?? {};
+    const explicit = input.config ?? {};
+    if (!isPlainObject(explicit)) {
+      throw new TypeError(`${name}.config must be an object.`);
+    }
+    const allow = capabilities?.skinAllow ?? /* @__PURE__ */ new Set();
+    assertSkinPaths(name, `preset '${presetName}'`, preset, allow);
+    assertSkinPaths(name, "overrides", overrides, allow);
+    assertKnownKeys(name, explicit, configDefaults);
+    definition.validateInput?.(name, explicit);
+    let config = cloneValue(configDefaults);
+    config = mergeValue(config, preset);
+    config = mergeValue(config, overrides);
+    config = mergeValue(config, surfaceProfile);
+    config = mergeValue(config, deviceProfile);
+    config = mergeValue(config, explicit);
+    validateCommonConfig(name, config);
+    validate(config);
+    config = freezeValue(config);
+    const selection = Object.freeze({
+      requestedSkin: requested,
+      preset: presetName,
+      surface: surfaceName,
+      requestedDevice,
+      resolvedDevice
+    });
+    return { config, selection };
+  }
+
   // src/install.js
-  function installEffect(name, rendererFactory, normalizeConfig) {
+  function installEffect(definition) {
+    const { name } = definition;
     const namespace = globalThis.Demoscene && typeof globalThis.Demoscene === "object" ? globalThis.Demoscene : {};
-    namespace[name] = (target, options) => {
-      const config = normalizeConfig(options);
-      return mountEffect(target, rendererFactory, config);
+    namespace[name] = (target, descriptor) => {
+      const { config, selection } = resolveDescriptor(definition, descriptor);
+      return mountEffect(target, definition.rendererFactory, config, selection);
     };
     globalThis.Demoscene = namespace;
     return namespace[name];
@@ -458,47 +605,7 @@
   }
   var SINE_PHASE_OFFSETS = [0, 2 * Math.PI / 3, 4 * Math.PI / 3];
 
-  // src/effects/copper-bars.js
-  var DEFAULT_BARS = [
-    { yBase: 0.22, amplitude: 0.12, frequency: 0.7, phase: 0, height: 0.048, colorOffset: 0 },
-    { yBase: 0.4, amplitude: 0.1, frequency: 0.9, phase: 1, height: 0.063, colorOffset: 0.2 },
-    { yBase: 0.55, amplitude: 0.13, frequency: 0.6, phase: 2, height: 0.041, colorOffset: 0.4 },
-    { yBase: 0.7, amplitude: 0.11, frequency: 1, phase: 3, height: 0.074, colorOffset: 0.65 },
-    { yBase: 0.85, amplitude: 0.09, frequency: 0.8, phase: 4, height: 0.052, colorOffset: 0.85 }
-  ];
-  var COPPER_BARS_DEFAULTS = createEffectDefaults({
-    render: { resolution: 0.5, smoothing: true },
-    motion: { speed: 1, colorCycleSpeed: 0.06 },
-    appearance: {
-      palette: ["#ff244c", "#ffe844", "#28e880", "#35a8ff", "#dc4dff", "#ff244c"],
-      colorCount: 360,
-      backgroundColor: "#060812"
-    },
-    bars: DEFAULT_BARS,
-    shading: {
-      glossyFalloff: 0.7,
-      highlightStrength: 90,
-      highlightWidth: 1.5
-    }
-  });
-  function normalizeCopperBarsConfig(input) {
-    return normalizeEffectConfig("copperBars", input, COPPER_BARS_DEFAULTS, (config) => {
-      if (!Array.isArray(config.bars) || config.bars.length < 1 || config.bars.length > 64) {
-        throw new RangeError("copperBars.bars must contain between 1 and 64 bars.");
-      }
-      config.bars.forEach((bar, index) => {
-        for (const key of ["yBase", "amplitude", "frequency", "phase", "height", "colorOffset"]) {
-          assertNumber(bar[key], `copperBars.bars[${index}].${key}`, {
-            min: ["amplitude", "frequency", "height"].includes(key) ? 0 : -Infinity
-          });
-        }
-      });
-      assertNumber(config.motion.colorCycleSpeed, "copperBars.motion.colorCycleSpeed");
-      assertNumber(config.shading.glossyFalloff, "copperBars.shading.glossyFalloff", { min: Number.MIN_VALUE });
-      assertNumber(config.shading.highlightStrength, "copperBars.shading.highlightStrength", { min: 0 });
-      assertNumber(config.shading.highlightWidth, "copperBars.shading.highlightWidth", { min: 0 });
-    });
-  }
+  // src/effects/copper-bars/renderer.js
   function createCopperBarsRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
@@ -551,6 +658,78 @@
     };
   }
 
+  // src/effects/copper-bars/config.js
+  var DEFAULT_BARS = [
+    { yBase: 0.22, amplitude: 0.12, frequency: 0.7, phase: 0, height: 0.048, colorOffset: 0 },
+    { yBase: 0.4, amplitude: 0.1, frequency: 0.9, phase: 1, height: 0.063, colorOffset: 0.2 },
+    { yBase: 0.55, amplitude: 0.13, frequency: 0.6, phase: 2, height: 0.041, colorOffset: 0.4 },
+    { yBase: 0.7, amplitude: 0.11, frequency: 1, phase: 3, height: 0.074, colorOffset: 0.65 },
+    { yBase: 0.85, amplitude: 0.09, frequency: 0.8, phase: 4, height: 0.052, colorOffset: 0.85 }
+  ];
+  var COPPER_BARS_DEFAULTS = createEffectDefaults({
+    render: { resolution: 0.5, smoothing: true },
+    motion: { speed: 1, colorCycleSpeed: 0.06 },
+    appearance: {
+      palette: ["#ff244c", "#ffe844", "#28e880", "#35a8ff", "#dc4dff", "#ff244c"],
+      colorCount: 360,
+      backgroundColor: "#060812"
+    },
+    bars: DEFAULT_BARS,
+    shading: {
+      glossyFalloff: 0.7,
+      highlightStrength: 90,
+      highlightWidth: 1.5
+    }
+  });
+  function validateCopperBars(config) {
+    if (!Array.isArray(config.bars) || config.bars.length < 1 || config.bars.length > 64) {
+      throw new RangeError("copperBars.bars must contain between 1 and 64 bars.");
+    }
+    config.bars.forEach((bar, index) => {
+      for (const key of ["yBase", "amplitude", "frequency", "phase", "height", "colorOffset"]) {
+        assertNumber(bar[key], `copperBars.bars[${index}].${key}`, {
+          min: ["amplitude", "frequency", "height"].includes(key) ? 0 : -Infinity
+        });
+      }
+    });
+    assertNumber(config.motion.colorCycleSpeed, "copperBars.motion.colorCycleSpeed");
+    assertNumber(config.shading.glossyFalloff, "copperBars.shading.glossyFalloff", { min: Number.MIN_VALUE });
+    assertNumber(config.shading.highlightStrength, "copperBars.shading.highlightStrength", { min: 0 });
+    assertNumber(config.shading.highlightWidth, "copperBars.shading.highlightWidth", { min: 0 });
+  }
+
+  // src/effects/copper-bars/skins.js
+  var COPPER_BARS_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/copper-bars/profiles.js
+  var COPPER_BARS_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/copper-bars/index.js
+  var copperBarsDefinition = {
+    name: "copperBars",
+    rendererFactory: createCopperBarsRenderer,
+    configDefaults: COPPER_BARS_DEFAULTS,
+    validate: validateCopperBars,
+    skins: COPPER_BARS_SKINS,
+    profiles: COPPER_BARS_PROFILES,
+    capabilities: {
+      // Skins change presentation only. The bar *layout* and *shading* model are
+      // algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
+
   // browser-entry.js
-  installEffect("copperBars", createCopperBarsRenderer, normalizeCopperBarsConfig);
+  installEffect(copperBarsDefinition);
 })();

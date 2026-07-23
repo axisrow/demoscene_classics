@@ -15,6 +15,18 @@
     else if (isPlainObject(value)) Object.values(value).forEach(freezeValue);
     return value !== null && typeof value === "object" ? Object.freeze(value) : value;
   }
+  function mergeValue(defaultValue, inputValue) {
+    if (inputValue === void 0) return cloneValue(defaultValue);
+    if (isPlainObject(defaultValue) && isPlainObject(inputValue)) {
+      const result = {};
+      const keys = /* @__PURE__ */ new Set([...Object.keys(defaultValue), ...Object.keys(inputValue)]);
+      for (const key of keys) {
+        result[key] = mergeValue(defaultValue[key], inputValue[key]);
+      }
+      return result;
+    }
+    return cloneValue(inputValue);
+  }
   function assertKnownKeys(effectName, input, defaults, path = effectName) {
     if (!isPlainObject(input)) throw new TypeError(`${path} must be an object.`);
     for (const [key, value] of Object.entries(input)) {
@@ -31,18 +43,6 @@
         ));
       }
     }
-  }
-  function mergeValue(defaultValue, inputValue) {
-    if (inputValue === void 0) return cloneValue(defaultValue);
-    if (isPlainObject(defaultValue) && isPlainObject(inputValue)) {
-      const result = {};
-      const keys = /* @__PURE__ */ new Set([...Object.keys(defaultValue), ...Object.keys(inputValue)]);
-      for (const key of keys) {
-        result[key] = mergeValue(defaultValue[key], inputValue[key]);
-      }
-      return result;
-    }
-    return cloneValue(inputValue);
   }
   function assertNumber(value, path, { min = -Infinity, max = Infinity, integer = false } = {}) {
     if (!Number.isFinite(value) || value < min || value > max || integer && !Number.isInteger(value)) {
@@ -85,15 +85,6 @@
     assertNumber(motion.speed, `${effectName}.motion.speed`, { min: Number.MIN_VALUE });
     assertPalette(appearance.palette, `${effectName}.appearance.palette`, appearance.colorCount);
     assertString(appearance.backgroundColor, `${effectName}.appearance.backgroundColor`);
-  }
-  function normalizeEffectConfig(effectName, input, defaults, validate = () => {
-  }) {
-    const supplied = input === void 0 ? {} : input;
-    assertKnownKeys(effectName, supplied, defaults);
-    const config = mergeValue(defaults, supplied);
-    validateCommonConfig(effectName, config);
-    validate(config);
-    return freezeValue(config);
   }
   function cloneConfig(config) {
     return cloneValue(config);
@@ -201,7 +192,7 @@
     }
     return globalThis[RUNTIME_KEY];
   }
-  function mountEffect(target, rendererFactory, config) {
+  function mountEffect(target, rendererFactory, config, selection = null) {
     const canvas = resolveCanvas(target);
     const { autoStart, maxFps, pixelRatio, pauseWhenHidden } = config.runtime;
     const minimumFrameInterval = maxFps === Infinity ? 0 : 1e3 / maxFps;
@@ -285,7 +276,10 @@
         return controller;
       },
       getConfig() {
-        return cloneConfig(config);
+        return freezeValue(cloneConfig(config));
+      },
+      getSelection() {
+        return selection;
       },
       getStats() {
         return {
@@ -371,12 +365,165 @@
     return controller;
   }
 
+  // src/resolver.js
+  var DESCRIPTOR_KEYS = /* @__PURE__ */ new Set(["skin", "surface", "device", "config"]);
+  var V2_GROUPS = /* @__PURE__ */ new Set([
+    "runtime",
+    "render",
+    "motion",
+    "appearance",
+    "field",
+    "simulation",
+    "particles",
+    "geometry",
+    "camera",
+    "algorithm",
+    "texture",
+    "feedback",
+    "bars",
+    "shading",
+    "text",
+    "wave",
+    "stars"
+  ]);
+  var VALID_DEVICES = ["auto", "desktop", "mobile"];
+  function detectLegacy(name, input) {
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError(`${name}: descriptor must be an object.`);
+    }
+    for (const key of Object.keys(input)) {
+      if (V2_GROUPS.has(key)) {
+        throw new TypeError(
+          `${name}: the legacy v2 flat options object is no longer supported in API v3. Move '${key}' under the config escape hatch, e.g. Demoscene.${name}(canvas, { skin: 'classic', surface: 'fullscreen', device: 'auto', config: { ${key}: ... } }). See the API v3 migration guide.`
+        );
+      }
+      if (!DESCRIPTOR_KEYS.has(key)) {
+        throw new RangeError(`Unknown descriptor field: ${name}.${key}`);
+      }
+    }
+  }
+  function resolveSkin(name, skinField, skins) {
+    if (skinField === void 0 || skinField === null) {
+      return { requested: "classic", presetName: "classic", overrides: {} };
+    }
+    if (typeof skinField === "string") {
+      if (!(skinField in skins)) {
+        throw new RangeError(`${name}: unknown skin '${skinField}'. Known skins: ${Object.keys(skins).join(", ")}.`);
+      }
+      return { requested: skinField, presetName: skinField, overrides: {} };
+    }
+    if (isPlainObject(skinField)) {
+      for (const key of Object.keys(skinField)) {
+        if (key !== "preset" && key !== "overrides") {
+          throw new RangeError(`Unknown skin field: ${name}.skin.${key} (use 'preset' and/or 'overrides').`);
+        }
+      }
+      const presetName = skinField.preset ?? "classic";
+      if (typeof presetName !== "string" || !(presetName in skins)) {
+        throw new RangeError(`${name}: unknown skin preset '${String(presetName)}'. Known skins: ${Object.keys(skins).join(", ")}.`);
+      }
+      const overrides = skinField.overrides ?? {};
+      if (!isPlainObject(overrides)) {
+        throw new TypeError(`${name}.skin.overrides must be an object.`);
+      }
+      return { requested: skinField, presetName, overrides };
+    }
+    throw new TypeError(`${name}.skin must be a string or { preset, overrides }.`);
+  }
+  function resolveSurface(name, surfaceField, surfaces) {
+    const surfaceName = surfaceField ?? "fullscreen";
+    if (typeof surfaceName !== "string" || !(surfaceName in surfaces)) {
+      throw new RangeError(`${name}: unknown surface '${String(surfaceName)}'. Known surfaces: ${Object.keys(surfaces).join(", ")}.`);
+    }
+    return surfaceName;
+  }
+  function detectDevice(requestedDevice) {
+    if (requestedDevice !== "auto") return requestedDevice;
+    const matchMedia = globalThis.matchMedia;
+    if (typeof matchMedia !== "function") return "desktop";
+    try {
+      const narrow = matchMedia("(max-width: 767px)");
+      const coarse = matchMedia("(hover: none) and (pointer: coarse)");
+      const isMobile = Boolean(narrow?.matches) || Boolean(coarse?.matches);
+      return isMobile ? "mobile" : "desktop";
+    } catch {
+      return "desktop";
+    }
+  }
+  function resolveDevice(name, deviceField, devices) {
+    const requestedDevice = deviceField ?? "auto";
+    if (!VALID_DEVICES.includes(requestedDevice)) {
+      throw new RangeError(`${name}: unknown device '${String(requestedDevice)}'. Known devices: ${VALID_DEVICES.join(", ")}.`);
+    }
+    const resolvedDevice = detectDevice(requestedDevice);
+    if (!(resolvedDevice in devices)) {
+      throw new RangeError(`${name}: unknown resolved device '${resolvedDevice}'.`);
+    }
+    return { requestedDevice, resolvedDevice };
+  }
+  function assertSkinPaths(name, label, overlay, allow) {
+    if (!isPlainObject(overlay)) return;
+    for (const key of Object.keys(overlay)) {
+      if (!allow.has(key)) {
+        throw new RangeError(
+          `${name}: skin ${label} is out of scope at '${key}'. Skins may only touch: ${[...allow].join(", ")}. To override an algorithmic field, pass it under 'config' instead.`
+        );
+      }
+    }
+  }
+  function resolveDescriptor(definition, descriptor) {
+    const {
+      name,
+      configDefaults,
+      validate = () => {
+      },
+      skins,
+      profiles,
+      capabilities
+    } = definition;
+    const input = descriptor === void 0 ? {} : descriptor;
+    detectLegacy(name, input);
+    const { requested, presetName, overrides } = resolveSkin(name, input.skin, skins);
+    const preset = skins[presetName] ?? {};
+    const surfaceName = resolveSurface(name, input.surface, profiles.surfaces);
+    const surfaceProfile = profiles.surfaces[surfaceName] ?? {};
+    const { requestedDevice, resolvedDevice } = resolveDevice(name, input.device, profiles.devices);
+    const deviceProfile = profiles.devices[resolvedDevice] ?? {};
+    const explicit = input.config ?? {};
+    if (!isPlainObject(explicit)) {
+      throw new TypeError(`${name}.config must be an object.`);
+    }
+    const allow = capabilities?.skinAllow ?? /* @__PURE__ */ new Set();
+    assertSkinPaths(name, `preset '${presetName}'`, preset, allow);
+    assertSkinPaths(name, "overrides", overrides, allow);
+    assertKnownKeys(name, explicit, configDefaults);
+    definition.validateInput?.(name, explicit);
+    let config = cloneValue(configDefaults);
+    config = mergeValue(config, preset);
+    config = mergeValue(config, overrides);
+    config = mergeValue(config, surfaceProfile);
+    config = mergeValue(config, deviceProfile);
+    config = mergeValue(config, explicit);
+    validateCommonConfig(name, config);
+    validate(config);
+    config = freezeValue(config);
+    const selection = Object.freeze({
+      requestedSkin: requested,
+      preset: presetName,
+      surface: surfaceName,
+      requestedDevice,
+      resolvedDevice
+    });
+    return { config, selection };
+  }
+
   // src/install.js
-  function installEffect(name, rendererFactory, normalizeConfig) {
+  function installEffect(definition) {
+    const { name } = definition;
     const namespace = globalThis.Demoscene && typeof globalThis.Demoscene === "object" ? globalThis.Demoscene : {};
-    namespace[name] = (target, options) => {
-      const config = normalizeConfig(options);
-      return mountEffect(target, rendererFactory, config);
+    namespace[name] = (target, descriptor) => {
+      const { config, selection } = resolveDescriptor(definition, descriptor);
+      return mountEffect(target, definition.rendererFactory, config, selection);
     };
     globalThis.Demoscene = namespace;
     return namespace[name];
@@ -483,55 +630,7 @@
   }
   var SINE_PHASE_OFFSETS = [0, 2 * Math.PI / 3, 4 * Math.PI / 3];
 
-  // src/effects/plasma.js
-  var PLASMA_DEFAULTS = createEffectDefaults({
-    render: { resolution: 0.25, smoothing: false },
-    motion: { speed: 1, paletteCycleSpeed: 0.19 },
-    appearance: {
-      palette: [
-        "#80ed12",
-        "#bfbf01",
-        "#ed8012",
-        "#ff4040",
-        "#ed127f",
-        "#bf01bf",
-        "#8012ed",
-        "#4040ff",
-        "#127fed",
-        "#01bfbf",
-        "#12ed80",
-        "#40ff40",
-        "#7fed12"
-      ],
-      colorCount: 256,
-      backgroundColor: "#000000"
-    },
-    field: {
-      frequencies: [0.04, 0.04, 0.04, 1],
-      radialCenterX: 0.5,
-      radialCenterY: 0.5,
-      amplitudes: [1, 1, 1, 1],
-      phaseRates: [1, 0.5, 0.5, 1]
-    }
-  });
-  function normalizePlasmaConfig(input) {
-    return normalizeEffectConfig("plasma", input, PLASMA_DEFAULTS, (config) => {
-      assertNumber(config.motion.paletteCycleSpeed, "plasma.motion.paletteCycleSpeed", { min: 0 });
-      for (const key of ["radialCenterX", "radialCenterY"]) {
-        assertNumber(config.field[key], `plasma.field.${key}`);
-      }
-      for (const key of ["frequencies", "amplitudes", "phaseRates"]) {
-        if (!Array.isArray(config.field[key]) || config.field[key].length !== 4) {
-          throw new RangeError(`plasma.field.${key} must contain four numbers.`);
-        }
-        config.field[key].forEach((value, index) => assertNumber(
-          value,
-          `plasma.field.${key}[${index}]`,
-          key === "frequencies" ? { min: Number.MIN_VALUE } : void 0
-        ));
-      }
-    });
-  }
+  // src/effects/plasma/renderer.js
   function createPlasmaRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
@@ -578,38 +677,87 @@
     };
   }
 
-  // src/effects/fire.js
-  var FIRE_DEFAULTS = createEffectDefaults({
+  // src/effects/plasma/config.js
+  var PLASMA_DEFAULTS = createEffectDefaults({
     render: { resolution: 0.25, smoothing: false },
-    motion: { speed: 1 },
+    motion: { speed: 1, paletteCycleSpeed: 0.19 },
     appearance: {
-      palette: ["#000000", "#ff0000", "#ffff00", "#ffffff"],
+      palette: [
+        "#80ed12",
+        "#bfbf01",
+        "#ed8012",
+        "#ff4040",
+        "#ed127f",
+        "#bf01bf",
+        "#8012ed",
+        "#4040ff",
+        "#127fed",
+        "#01bfbf",
+        "#12ed80",
+        "#40ff40",
+        "#7fed12"
+      ],
       colorCount: 256,
       backgroundColor: "#000000"
     },
-    simulation: {
-      seed: 1993,
-      stepHz: 60,
-      sourceDensity: 0.65,
-      sourceIntensity: 255,
-      sourceVariance: 96,
-      cooling: 2,
-      horizontalDrift: 1,
-      maxCatchUpSteps: 3
+    field: {
+      frequencies: [0.04, 0.04, 0.04, 1],
+      radialCenterX: 0.5,
+      radialCenterY: 0.5,
+      amplitudes: [1, 1, 1, 1],
+      phaseRates: [1, 0.5, 0.5, 1]
     }
   });
-  function normalizeFireConfig(input) {
-    return normalizeEffectConfig("fire", input, FIRE_DEFAULTS, (config) => {
-      assertNumber(config.simulation.seed, "fire.simulation.seed", { min: 0, max: 4294967295, integer: true });
-      assertNumber(config.simulation.stepHz, "fire.simulation.stepHz", { min: 1, max: 240 });
-      assertNumber(config.simulation.sourceDensity, "fire.simulation.sourceDensity", { min: 0, max: 1 });
-      assertNumber(config.simulation.sourceIntensity, "fire.simulation.sourceIntensity", { min: 0, max: 255, integer: true });
-      assertNumber(config.simulation.sourceVariance, "fire.simulation.sourceVariance", { min: 0, max: 255, integer: true });
-      assertNumber(config.simulation.cooling, "fire.simulation.cooling", { min: 0, max: 32, integer: true });
-      assertNumber(config.simulation.horizontalDrift, "fire.simulation.horizontalDrift", { min: 0, max: 16, integer: true });
-      assertNumber(config.simulation.maxCatchUpSteps, "fire.simulation.maxCatchUpSteps", { min: 1, max: 20, integer: true });
-    });
+  function validatePlasma(config) {
+    assertNumber(config.motion.paletteCycleSpeed, "plasma.motion.paletteCycleSpeed", { min: 0 });
+    for (const key of ["radialCenterX", "radialCenterY"]) {
+      assertNumber(config.field[key], `plasma.field.${key}`);
+    }
+    for (const key of ["frequencies", "amplitudes", "phaseRates"]) {
+      if (!Array.isArray(config.field[key]) || config.field[key].length !== 4) {
+        throw new RangeError(`plasma.field.${key} must contain four numbers.`);
+      }
+      config.field[key].forEach((value, index) => assertNumber(
+        value,
+        `plasma.field.${key}[${index}]`,
+        key === "frequencies" ? { min: Number.MIN_VALUE } : void 0
+      ));
+    }
   }
+
+  // src/effects/plasma/skins.js
+  var PLASMA_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/plasma/profiles.js
+  var PLASMA_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/plasma/index.js
+  var plasmaDefinition = {
+    name: "plasma",
+    rendererFactory: createPlasmaRenderer,
+    configDefaults: PLASMA_DEFAULTS,
+    validate: validatePlasma,
+    skins: PLASMA_SKINS,
+    profiles: PLASMA_PROFILES,
+    capabilities: {
+      // Skins may change presentation only. The plasma *field* (frequencies,
+      // centres, amplitudes) is algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
+
+  // src/effects/fire/renderer.js
   function createFireRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
@@ -665,47 +813,70 @@
     };
   }
 
-  // src/effects/starfield.js
-  var STARFIELD_DEFAULTS = createEffectDefaults({
-    render: { resolution: 1, smoothing: true },
+  // src/effects/fire/config.js
+  var FIRE_DEFAULTS = createEffectDefaults({
+    render: { resolution: 0.25, smoothing: false },
     motion: { speed: 1 },
     appearance: {
-      palette: ["#b4c8ff", "#ffffff"],
+      palette: ["#000000", "#ff0000", "#ffff00", "#ffffff"],
       colorCount: 256,
       backgroundColor: "#000000"
     },
-    particles: {
+    simulation: {
       seed: 1993,
-      particleCount: 600,
-      fov: 256,
-      depth: 256,
-      travelSpeed: 192,
-      centerX: 0.5,
-      centerY: 0.5,
-      trailFade: 0.35,
-      minAlpha: 0.25,
-      maxAlpha: 0.95,
-      minLineWidth: 1,
-      maxLineWidth: 3
+      stepHz: 60,
+      sourceDensity: 0.65,
+      sourceIntensity: 255,
+      sourceVariance: 96,
+      cooling: 2,
+      horizontalDrift: 1,
+      maxCatchUpSteps: 3
     }
   });
-  function normalizeStarfieldConfig(input) {
-    return normalizeEffectConfig("starfield", input, STARFIELD_DEFAULTS, (config) => {
-      assertNumber(config.particles.seed, "starfield.particles.seed", { min: 0, max: 4294967295, integer: true });
-      assertNumber(config.particles.particleCount, "starfield.particles.particleCount", { min: 1, max: 1e4, integer: true });
-      for (const key of ["fov", "depth", "travelSpeed"]) {
-        assertNumber(config.particles[key], `starfield.particles.${key}`, { min: Number.MIN_VALUE });
-      }
-      for (const key of ["centerX", "centerY", "trailFade", "minAlpha", "maxAlpha"]) {
-        assertNumber(config.particles[key], `starfield.particles.${key}`, { min: 0, max: 1 });
-      }
-      assertNumber(config.particles.minLineWidth, "starfield.particles.minLineWidth", { min: Number.MIN_VALUE });
-      assertNumber(config.particles.maxLineWidth, "starfield.particles.maxLineWidth", { min: config.particles.minLineWidth });
-      if (config.particles.maxAlpha < config.particles.minAlpha) {
-        throw new RangeError("starfield.particles.maxAlpha must be at least minAlpha.");
-      }
-    });
+  function validateFire(config) {
+    assertNumber(config.simulation.seed, "fire.simulation.seed", { min: 0, max: 4294967295, integer: true });
+    assertNumber(config.simulation.stepHz, "fire.simulation.stepHz", { min: 1, max: 240 });
+    assertNumber(config.simulation.sourceDensity, "fire.simulation.sourceDensity", { min: 0, max: 1 });
+    assertNumber(config.simulation.sourceIntensity, "fire.simulation.sourceIntensity", { min: 0, max: 255, integer: true });
+    assertNumber(config.simulation.sourceVariance, "fire.simulation.sourceVariance", { min: 0, max: 255, integer: true });
+    assertNumber(config.simulation.cooling, "fire.simulation.cooling", { min: 0, max: 32, integer: true });
+    assertNumber(config.simulation.horizontalDrift, "fire.simulation.horizontalDrift", { min: 0, max: 16, integer: true });
+    assertNumber(config.simulation.maxCatchUpSteps, "fire.simulation.maxCatchUpSteps", { min: 1, max: 20, integer: true });
   }
+
+  // src/effects/fire/skins.js
+  var FIRE_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/fire/profiles.js
+  var FIRE_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/fire/index.js
+  var fireDefinition = {
+    name: "fire",
+    rendererFactory: createFireRenderer,
+    configDefaults: FIRE_DEFAULTS,
+    validate: validateFire,
+    skins: FIRE_SKINS,
+    profiles: FIRE_PROFILES,
+    capabilities: {
+      // Skins change presentation only. The heat *simulation* (seed, cooling,
+      // source intensity) is algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
+
+  // src/effects/starfield/renderer.js
   function createStarfieldRenderer({ canvas, config }) {
     const output = getContext2D(canvas, { alpha: false });
     const buffer = createDrawingBuffer();
@@ -774,75 +945,79 @@
     };
   }
 
-  // src/effects/metaballs.js
-  var POINT_KEYS = /* @__PURE__ */ new Set([
-    "amplitudeX",
-    "amplitudeY",
-    "frequencyX",
-    "frequencyY",
-    "phaseX",
-    "phaseY",
-    "strength"
-  ]);
-  var METABALLS_DEFAULTS = createEffectDefaults({
-    render: { resolution: 1 / 3, smoothing: false },
+  // src/effects/starfield/config.js
+  var STARFIELD_DEFAULTS = createEffectDefaults({
+    render: { resolution: 1, smoothing: true },
     motion: { speed: 1 },
     appearance: {
-      palette: ["#050014", "#0a2878", "#00aac8", "#3ce678", "#f0e628", "#ffffff"],
-      colorCount: 512,
-      backgroundColor: "#050014"
+      palette: ["#b4c8ff", "#ffffff"],
+      colorCount: 256,
+      backgroundColor: "#000000"
     },
-    field: {
-      pointCount: 5,
-      points: null,
-      fieldStrength: 1,
-      threshold: 1,
-      lowScale: 60,
-      highScale: 420
+    particles: {
+      seed: 1993,
+      particleCount: 600,
+      fov: 256,
+      depth: 256,
+      travelSpeed: 192,
+      centerX: 0.5,
+      centerY: 0.5,
+      trailFade: 0.35,
+      minAlpha: 0.25,
+      maxAlpha: 0.95,
+      minLineWidth: 1,
+      maxLineWidth: 3
     }
   });
-  function generatedPoint(index) {
-    return {
-      amplitudeX: 0.6 + index * 0.13,
-      amplitudeY: 0.8 + index * 0.11,
-      frequencyX: 0.8 + index * 0.27,
-      frequencyY: 1.1 + index * 0.21,
-      phaseX: 0.7 + index * 1.7,
-      phaseY: 1.3 + index * 1.3,
-      strength: 240 + index * 60
-    };
-  }
-  function normalizeMetaballsConfig(input) {
-    if (input?.field?.points !== void 0 && input?.field?.pointCount !== void 0) {
-      throw new RangeError("metaballs.field.pointCount and metaballs.field.points cannot be used together.");
+  function validateStarfield(config) {
+    assertNumber(config.particles.seed, "starfield.particles.seed", { min: 0, max: 4294967295, integer: true });
+    assertNumber(config.particles.particleCount, "starfield.particles.particleCount", { min: 1, max: 1e4, integer: true });
+    for (const key of ["fov", "depth", "travelSpeed"]) {
+      assertNumber(config.particles[key], `starfield.particles.${key}`, { min: Number.MIN_VALUE });
     }
-    const config = normalizeEffectConfig("metaballs", input, METABALLS_DEFAULTS, (next) => {
-      assertNumber(next.field.pointCount, "metaballs.field.pointCount", { min: 1, max: 64, integer: true });
-      for (const key of ["fieldStrength", "threshold", "lowScale", "highScale"]) {
-        assertNumber(next.field[key], `metaballs.field.${key}`, { min: Number.MIN_VALUE });
-      }
-      if (next.field.points !== null) {
-        if (!Array.isArray(next.field.points) || next.field.points.length < 1 || next.field.points.length > 64) {
-          throw new RangeError("metaballs.field.points must contain between 1 and 64 points.");
-        }
-        next.field.points.forEach((point, index) => {
-          if (point === null || typeof point !== "object" || Array.isArray(point)) {
-            throw new TypeError(`metaballs.field.points[${index}] must be an object.`);
-          }
-          for (const key of Object.keys(point)) {
-            if (!POINT_KEYS.has(key)) throw new RangeError(`Unknown option: metaballs.field.points[${index}].${key}`);
-          }
-          for (const key of POINT_KEYS) {
-            assertNumber(point[key], `metaballs.field.points[${index}].${key}`, {
-              min: key === "strength" ? Number.MIN_VALUE : -Infinity
-            });
-          }
-        });
-        next.field.pointCount = next.field.points.length;
-      }
-    });
-    return config;
+    for (const key of ["centerX", "centerY", "trailFade", "minAlpha", "maxAlpha"]) {
+      assertNumber(config.particles[key], `starfield.particles.${key}`, { min: 0, max: 1 });
+    }
+    assertNumber(config.particles.minLineWidth, "starfield.particles.minLineWidth", { min: Number.MIN_VALUE });
+    assertNumber(config.particles.maxLineWidth, "starfield.particles.maxLineWidth", { min: config.particles.minLineWidth });
+    if (config.particles.maxAlpha < config.particles.minAlpha) {
+      throw new RangeError("starfield.particles.maxAlpha must be at least minAlpha.");
+    }
   }
+
+  // src/effects/starfield/skins.js
+  var STARFIELD_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/starfield/profiles.js
+  var STARFIELD_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/starfield/index.js
+  var starfieldDefinition = {
+    name: "starfield",
+    rendererFactory: createStarfieldRenderer,
+    configDefaults: STARFIELD_DEFAULTS,
+    validate: validateStarfield,
+    skins: STARFIELD_SKINS,
+    profiles: STARFIELD_PROFILES,
+    capabilities: {
+      // Skins change presentation only. The particle projection (seed, count,
+      // fov, depth, travel) is algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
+
+  // src/effects/metaballs/renderer.js
   function createMetaballsRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
@@ -896,39 +1071,110 @@
       }
     };
   }
+  function generatedPoint(index) {
+    return {
+      amplitudeX: 0.6 + index * 0.13,
+      amplitudeY: 0.8 + index * 0.11,
+      frequencyX: 0.8 + index * 0.27,
+      frequencyY: 1.1 + index * 0.21,
+      phaseX: 0.7 + index * 1.7,
+      phaseY: 1.3 + index * 1.3,
+      strength: 240 + index * 60
+    };
+  }
 
-  // src/effects/tunnel.js
-  var TUNNEL_DEFAULTS = createEffectDefaults({
+  // src/effects/metaballs/config.js
+  var POINT_KEYS = /* @__PURE__ */ new Set([
+    "amplitudeX",
+    "amplitudeY",
+    "frequencyX",
+    "frequencyY",
+    "phaseX",
+    "phaseY",
+    "strength"
+  ]);
+  var METABALLS_DEFAULTS = createEffectDefaults({
     render: { resolution: 1 / 3, smoothing: false },
-    motion: { speed: 1, forwardSpeed: 84, rotationSpeed: 1.26, colorCycleSpeed: 63 },
+    motion: { speed: 1 },
     appearance: {
-      palette: ["#ff80ee", "#60dfff", "#ffe86b", "#ff80ee"],
-      colorCount: 256,
-      backgroundColor: "#000000"
+      palette: ["#050014", "#0a2878", "#00aac8", "#3ce678", "#f0e628", "#ffffff"],
+      colorCount: 512,
+      backgroundColor: "#050014"
     },
-    geometry: {
-      centerX: 0.5,
-      centerY: 0.5,
-      radialFrequency: 60,
-      angularFrequency: 6,
-      fogDistance: 0.5,
-      fogMinimum: 0.15
+    field: {
+      pointCount: 5,
+      points: null,
+      fieldStrength: 1,
+      threshold: 1,
+      lowScale: 60,
+      highScale: 420
     }
   });
-  function normalizeTunnelConfig(input) {
-    return normalizeEffectConfig("tunnel", input, TUNNEL_DEFAULTS, (config) => {
-      for (const key of ["forwardSpeed", "rotationSpeed", "colorCycleSpeed"]) {
-        assertNumber(config.motion[key], `tunnel.motion.${key}`);
-      }
-      for (const key of ["centerX", "centerY"]) {
-        assertNumber(config.geometry[key], `tunnel.geometry.${key}`);
-      }
-      for (const key of ["radialFrequency", "angularFrequency", "fogDistance"]) {
-        assertNumber(config.geometry[key], `tunnel.geometry.${key}`, { min: Number.MIN_VALUE });
-      }
-      assertNumber(config.geometry.fogMinimum, "tunnel.geometry.fogMinimum", { min: 0, max: 1 });
-    });
+  function validateMetaballsInput(name, explicit) {
+    if (explicit?.field?.points !== void 0 && explicit?.field?.pointCount !== void 0) {
+      throw new RangeError(`${name}.field.pointCount and ${name}.field.points cannot be used together.`);
+    }
   }
+  function validateMetaballs(config) {
+    assertNumber(config.field.pointCount, "metaballs.field.pointCount", { min: 1, max: 64, integer: true });
+    for (const key of ["fieldStrength", "threshold", "lowScale", "highScale"]) {
+      assertNumber(config.field[key], `metaballs.field.${key}`, { min: Number.MIN_VALUE });
+    }
+    if (config.field.points !== null) {
+      if (!Array.isArray(config.field.points) || config.field.points.length < 1 || config.field.points.length > 64) {
+        throw new RangeError("metaballs.field.points must contain between 1 and 64 points.");
+      }
+      config.field.points.forEach((point, index) => {
+        if (point === null || typeof point !== "object" || Array.isArray(point)) {
+          throw new TypeError(`metaballs.field.points[${index}] must be an object.`);
+        }
+        for (const key of Object.keys(point)) {
+          if (!POINT_KEYS.has(key)) throw new RangeError(`Unknown option: metaballs.field.points[${index}].${key}`);
+        }
+        for (const key of POINT_KEYS) {
+          assertNumber(point[key], `metaballs.field.points[${index}].${key}`, {
+            min: key === "strength" ? Number.MIN_VALUE : -Infinity
+          });
+        }
+      });
+      config.field.pointCount = config.field.points.length;
+    }
+  }
+
+  // src/effects/metaballs/skins.js
+  var METABALLS_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/metaballs/profiles.js
+  var METABALLS_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/metaballs/index.js
+  var metaballsDefinition = {
+    name: "metaballs",
+    rendererFactory: createMetaballsRenderer,
+    configDefaults: METABALLS_DEFAULTS,
+    validate: validateMetaballs,
+    validateInput: validateMetaballsInput,
+    skins: METABALLS_SKINS,
+    profiles: METABALLS_PROFILES,
+    capabilities: {
+      // Skins change presentation only. The scalar *field* (point count, paths,
+      // threshold) is algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
+
+  // src/effects/tunnel/renderer.js
   function createTunnelRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
@@ -978,7 +1224,70 @@
     };
   }
 
-  // src/effects/mandelbrot-core.js
+  // src/effects/tunnel/config.js
+  var TUNNEL_DEFAULTS = createEffectDefaults({
+    render: { resolution: 1 / 3, smoothing: false },
+    motion: { speed: 1, forwardSpeed: 84, rotationSpeed: 1.26, colorCycleSpeed: 63 },
+    appearance: {
+      palette: ["#ff80ee", "#60dfff", "#ffe86b", "#ff80ee"],
+      colorCount: 256,
+      backgroundColor: "#000000"
+    },
+    geometry: {
+      centerX: 0.5,
+      centerY: 0.5,
+      radialFrequency: 60,
+      angularFrequency: 6,
+      fogDistance: 0.5,
+      fogMinimum: 0.15
+    }
+  });
+  function validateTunnel(config) {
+    for (const key of ["forwardSpeed", "rotationSpeed", "colorCycleSpeed"]) {
+      assertNumber(config.motion[key], `tunnel.motion.${key}`);
+    }
+    for (const key of ["centerX", "centerY"]) {
+      assertNumber(config.geometry[key], `tunnel.geometry.${key}`);
+    }
+    for (const key of ["radialFrequency", "angularFrequency", "fogDistance"]) {
+      assertNumber(config.geometry[key], `tunnel.geometry.${key}`, { min: Number.MIN_VALUE });
+    }
+    assertNumber(config.geometry.fogMinimum, "tunnel.geometry.fogMinimum", { min: 0, max: 1 });
+  }
+
+  // src/effects/tunnel/skins.js
+  var TUNNEL_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/tunnel/profiles.js
+  var TUNNEL_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/tunnel/index.js
+  var tunnelDefinition = {
+    name: "tunnel",
+    rendererFactory: createTunnelRenderer,
+    configDefaults: TUNNEL_DEFAULTS,
+    validate: validateTunnel,
+    skins: TUNNEL_SKINS,
+    profiles: TUNNEL_PROFILES,
+    capabilities: {
+      // Skins change presentation only. The polar *geometry* (centre, frequencies,
+      // fog) is algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
+
+  // src/effects/mandelbrot/mandelbrot-core.js
   function mandelbrotZoom(time, {
     minZoom,
     maxZoom,
@@ -1057,7 +1366,7 @@
     return { zoom, maxIterations };
   }
 
-  // src/effects/mandelbrot-webgl.js
+  // src/effects/mandelbrot/mandelbrot-webgl.js
   var VERTEX_SHADER = `#version 300 es
 const vec2 POSITIONS[3] = vec2[3](
   vec2(-1.0, -1.0),
@@ -1461,71 +1770,8 @@ void main() {
     };
   }
 
-  // src/effects/mandelbrot.js
+  // src/effects/mandelbrot/renderer.js
   var MANDELBROT_INTERIOR_COLOR = packRgb(0, 0, 0);
-  var MANDELBROT_DEFAULTS = createEffectDefaults({
-    render: { backend: "canvas2d", resolution: 0.2, smoothing: false },
-    motion: { speed: 1, cycleSeconds: 28, startPhase: 0 },
-    appearance: {
-      palette: [
-        "#80ed12",
-        "#bfbf01",
-        "#ed8012",
-        "#ff4040",
-        "#ed127f",
-        "#bf01bf",
-        "#8012ed",
-        "#4040ff",
-        "#127fed",
-        "#01bfbf",
-        "#12ed80",
-        "#40ff40",
-        "#7fed12"
-      ],
-      colorCount: 1024,
-      backgroundColor: "#000000",
-      interiorColor: "#000000"
-    },
-    camera: {
-      centerX: -0.7436438870371587,
-      centerY: 0.1318259042053119,
-      minZoom: 1,
-      maxZoom: 1e6
-    },
-    algorithm: {
-      iterationBase: 80,
-      iterationGrowth: 60,
-      maxIterations: null,
-      escapeRadius: 16
-    }
-  });
-  function normalizeMandelbrotConfig(input) {
-    return normalizeEffectConfig("mandelbrot", input, MANDELBROT_DEFAULTS, (config) => {
-      assertString(config.render.backend, "mandelbrot.render.backend");
-      if (!["auto", "webgl2", "canvas2d"].includes(config.render.backend)) {
-        throw new RangeError("mandelbrot.render.backend must be auto, webgl2 or canvas2d.");
-      }
-      assertNumber(config.motion.cycleSeconds, "mandelbrot.motion.cycleSeconds", { min: Number.MIN_VALUE });
-      assertNumber(config.motion.startPhase, "mandelbrot.motion.startPhase", { min: 0, max: 1 });
-      for (const key of ["centerX", "centerY"]) {
-        assertNumber(config.camera[key], `mandelbrot.camera.${key}`);
-      }
-      assertNumber(config.camera.minZoom, "mandelbrot.camera.minZoom", { min: Number.MIN_VALUE });
-      assertNumber(config.camera.maxZoom, "mandelbrot.camera.maxZoom", {
-        min: config.camera.minZoom + Number.EPSILON
-      });
-      assertNumber(config.algorithm.iterationBase, "mandelbrot.algorithm.iterationBase", { min: 1 });
-      assertNumber(config.algorithm.iterationGrowth, "mandelbrot.algorithm.iterationGrowth", { min: 0 });
-      if (config.algorithm.maxIterations !== null) {
-        assertNumber(config.algorithm.maxIterations, "mandelbrot.algorithm.maxIterations", {
-          min: 1,
-          max: 1e4,
-          integer: true
-        });
-      }
-      assertNumber(config.algorithm.escapeRadius, "mandelbrot.algorithm.escapeRadius", { min: 2 });
-    });
-  }
   function createMandelbrotCanvas2DRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
@@ -1574,72 +1820,102 @@ void main() {
     return createMandelbrotCanvas2DRenderer({ canvas, config });
   }
 
-  // src/effects/sine-scroller.js
-  var DEFAULT_TEXT = "  GREETZ TO ALL DEMOSCENERS  ***  PLASMA  FIRE  METABALLS  TUNNEL  FRACTALS  ROTOZOOM  FEEDBACK  COPPER BARS  ***  JS DEMO PACK 2026  ***  KEEP IT REAL  ***  ";
-  var SINE_SCROLLER_DEFAULTS = createEffectDefaults({
-    render: { resolution: 1, smoothing: true },
-    motion: { speed: 1, scrollSpeed: 132, phaseSpeed: 3, colorCycleSpeed: 0.33 },
+  // src/effects/mandelbrot/config.js
+  var MANDELBROT_DEFAULTS = createEffectDefaults({
+    render: { backend: "canvas2d", resolution: 0.2, smoothing: false },
+    motion: { speed: 1, cycleSeconds: 28, startPhase: 0 },
     appearance: {
-      palette: ["#78a0ff", "#70f0ff", "#f080ff", "#ffe66d", "#78a0ff"],
-      colorCount: 360,
-      backgroundColor: "#04040a",
-      shadowColor: "#000000",
-      shadowAlpha: 0.6,
-      starColor: "#78a0ff"
+      palette: [
+        "#80ed12",
+        "#bfbf01",
+        "#ed8012",
+        "#ff4040",
+        "#ed127f",
+        "#bf01bf",
+        "#8012ed",
+        "#4040ff",
+        "#127fed",
+        "#01bfbf",
+        "#12ed80",
+        "#40ff40",
+        "#7fed12"
+      ],
+      colorCount: 1024,
+      backgroundColor: "#000000",
+      interiorColor: "#000000"
     },
-    text: {
-      content: DEFAULT_TEXT,
-      fontFamily: "Courier New, monospace",
-      fontWeight: 900,
-      fontSizeRatio: 0.13,
-      maxFontSize: 72,
-      characterWidthRatio: 0.62,
-      shadowOffsetX: 4,
-      shadowOffsetY: 4
+    camera: {
+      centerX: -0.7436438870371587,
+      centerY: 0.1318259042053119,
+      minZoom: 1,
+      maxZoom: 1e6
     },
-    wave: { baseline: 0.62, amplitude: 0.12, frequency: 0.018 },
-    stars: {
-      seed: 1993,
-      count: 220,
-      speed: 36,
-      minDepth: 0.2,
-      maxDepth: 2.2,
-      minSize: 0.3,
-      maxSize: 1.9,
-      minAlpha: 0.3,
-      maxAlpha: 1
+    algorithm: {
+      iterationBase: 80,
+      iterationGrowth: 60,
+      maxIterations: null,
+      escapeRadius: 16
     }
   });
-  function normalizeSineScrollerConfig(input) {
-    return normalizeEffectConfig("sineScroller", input, SINE_SCROLLER_DEFAULTS, (config) => {
-      for (const key of ["content", "fontFamily"]) assertString(config.text[key], `sineScroller.text.${key}`);
-      assertNumber(config.text.fontWeight, "sineScroller.text.fontWeight", { min: 100, max: 1e3, integer: true });
-      for (const key of ["fontSizeRatio", "maxFontSize", "characterWidthRatio"]) {
-        assertNumber(config.text[key], `sineScroller.text.${key}`, { min: Number.MIN_VALUE });
-      }
-      for (const key of ["shadowOffsetX", "shadowOffsetY"]) assertNumber(config.text[key], `sineScroller.text.${key}`);
-      assertNumber(config.wave.baseline, "sineScroller.wave.baseline", { min: 0, max: 1 });
-      assertNumber(config.wave.amplitude, "sineScroller.wave.amplitude", { min: 0, max: 1 });
-      assertNumber(config.wave.frequency, "sineScroller.wave.frequency", { min: Number.MIN_VALUE });
-      for (const key of ["scrollSpeed", "phaseSpeed", "colorCycleSpeed"]) {
-        assertNumber(config.motion[key], `sineScroller.motion.${key}`);
-      }
-      assertNumber(config.appearance.shadowAlpha, "sineScroller.appearance.shadowAlpha", { min: 0, max: 1 });
-      assertString(config.appearance.shadowColor, "sineScroller.appearance.shadowColor");
-      assertString(config.appearance.starColor, "sineScroller.appearance.starColor");
-      assertNumber(config.stars.seed, "sineScroller.stars.seed", { min: 0, max: 4294967295, integer: true });
-      assertNumber(config.stars.count, "sineScroller.stars.count", { min: 0, max: 5e3, integer: true });
-      for (const key of ["speed", "minDepth", "maxDepth", "minSize", "maxSize", "minAlpha", "maxAlpha"]) {
-        assertNumber(config.stars[key], `sineScroller.stars.${key}`, { min: 0 });
-      }
-      for (const [minimum, maximum] of [["minDepth", "maxDepth"], ["minSize", "maxSize"], ["minAlpha", "maxAlpha"]]) {
-        if (config.stars[maximum] < config.stars[minimum]) {
-          throw new RangeError(`sineScroller.stars.${maximum} must be at least ${minimum}.`);
-        }
-      }
-      if (config.stars.maxAlpha > 1) throw new RangeError("sineScroller.stars.maxAlpha must be at most 1.");
+  function validateMandelbrot(config) {
+    assertString(config.render.backend, "mandelbrot.render.backend");
+    if (!["auto", "webgl2", "canvas2d"].includes(config.render.backend)) {
+      throw new RangeError("mandelbrot.render.backend must be auto, webgl2 or canvas2d.");
+    }
+    assertNumber(config.motion.cycleSeconds, "mandelbrot.motion.cycleSeconds", { min: Number.MIN_VALUE });
+    assertNumber(config.motion.startPhase, "mandelbrot.motion.startPhase", { min: 0, max: 1 });
+    for (const key of ["centerX", "centerY"]) {
+      assertNumber(config.camera[key], `mandelbrot.camera.${key}`);
+    }
+    assertNumber(config.camera.minZoom, "mandelbrot.camera.minZoom", { min: Number.MIN_VALUE });
+    assertNumber(config.camera.maxZoom, "mandelbrot.camera.maxZoom", {
+      min: config.camera.minZoom + Number.EPSILON
     });
+    assertNumber(config.algorithm.iterationBase, "mandelbrot.algorithm.iterationBase", { min: 1 });
+    assertNumber(config.algorithm.iterationGrowth, "mandelbrot.algorithm.iterationGrowth", { min: 0 });
+    if (config.algorithm.maxIterations !== null) {
+      assertNumber(config.algorithm.maxIterations, "mandelbrot.algorithm.maxIterations", {
+        min: 1,
+        max: 1e4,
+        integer: true
+      });
+    }
+    assertNumber(config.algorithm.escapeRadius, "mandelbrot.algorithm.escapeRadius", { min: 2 });
   }
+
+  // src/effects/mandelbrot/skins.js
+  var MANDELBROT_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/mandelbrot/profiles.js
+  var MANDELBROT_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/mandelbrot/index.js
+  var mandelbrotDefinition = {
+    name: "mandelbrot",
+    rendererFactory: createMandelbrotRenderer,
+    configDefaults: MANDELBROT_DEFAULTS,
+    validate: validateMandelbrot,
+    skins: MANDELBROT_SKINS,
+    profiles: MANDELBROT_PROFILES,
+    capabilities: {
+      // Skins change presentation only. The fractal *camera* target and the
+      // escape-time *algorithm* are algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
+
+  // src/effects/sine-scroller/renderer.js
   function createSineScrollerRenderer({ canvas, config }) {
     const output = getContext2D(canvas, { alpha: false });
     const buffer = createDrawingBuffer();
@@ -1724,63 +2000,104 @@ void main() {
     };
   }
 
-  // src/effects/rotozoom.js
-  var ROTOZOOM_DEFAULTS = createEffectDefaults({
-    render: { resolution: 0.5, smoothing: true },
-    motion: {
-      speed: 1,
-      rotationSpeed: 0.8,
-      zoomBase: 1.2,
-      zoomAmplitude: 0.7,
-      zoomSpeed: 0.5
-    },
+  // src/effects/sine-scroller/config.js
+  var DEFAULT_TEXT = "  GREETZ TO ALL DEMOSCENERS  ***  PLASMA  FIRE  METABALLS  TUNNEL  FRACTALS  ROTOZOOM  FEEDBACK  COPPER BARS  ***  JS DEMO PACK 2026  ***  KEEP IT REAL  ***  ";
+  var SINE_SCROLLER_DEFAULTS = createEffectDefaults({
+    render: { resolution: 1, smoothing: true },
+    motion: { speed: 1, scrollSpeed: 132, phaseSpeed: 3, colorCycleSpeed: 0.33 },
     appearance: {
-      palette: ["#141e28", "#284d68", "#d47832", "#f0b050", "#00f0c8", "#000000"],
-      colorCount: 256,
-      backgroundColor: "#000000"
+      palette: ["#78a0ff", "#70f0ff", "#f080ff", "#ffe66d", "#78a0ff"],
+      colorCount: 360,
+      backgroundColor: "#04040a",
+      shadowColor: "#000000",
+      shadowAlpha: 0.6,
+      starColor: "#78a0ff"
     },
-    texture: {
-      size: 256,
-      checkerSize: 32,
-      ringFrequency: 0.12,
-      spokeCount: 8,
-      centerRadius: 26,
-      borderRadius: 30
+    text: {
+      content: DEFAULT_TEXT,
+      fontFamily: "Courier New, monospace",
+      fontWeight: 900,
+      fontSizeRatio: 0.13,
+      maxFontSize: 72,
+      characterWidthRatio: 0.62,
+      shadowOffsetX: 4,
+      shadowOffsetY: 4
+    },
+    wave: { baseline: 0.62, amplitude: 0.12, frequency: 0.018 },
+    stars: {
+      seed: 1993,
+      count: 220,
+      speed: 36,
+      minDepth: 0.2,
+      maxDepth: 2.2,
+      minSize: 0.3,
+      maxSize: 1.9,
+      minAlpha: 0.3,
+      maxAlpha: 1
     }
   });
-  function normalizeRotozoomConfig(input) {
-    return normalizeEffectConfig("rotozoom", input, ROTOZOOM_DEFAULTS, (config) => {
-      for (const key of ["rotationSpeed", "zoomAmplitude", "zoomSpeed"]) {
-        assertNumber(config.motion[key], `rotozoom.motion.${key}`);
-      }
-      assertNumber(config.motion.zoomBase, "rotozoom.motion.zoomBase", { min: Number.MIN_VALUE });
-      assertNumber(config.texture.size, "rotozoom.texture.size", { min: 16, max: 1024, integer: true });
-      assertNumber(config.texture.checkerSize, "rotozoom.texture.checkerSize", { min: 1, max: 512, integer: true });
-      assertNumber(config.texture.ringFrequency, "rotozoom.texture.ringFrequency", { min: 0 });
-      assertNumber(config.texture.spokeCount, "rotozoom.texture.spokeCount", { min: 1, max: 64, integer: true });
-      assertNumber(config.texture.centerRadius, "rotozoom.texture.centerRadius", { min: 0 });
-      assertNumber(config.texture.borderRadius, "rotozoom.texture.borderRadius", { min: config.texture.centerRadius });
-    });
-  }
-  function buildTexture(config, palette) {
-    const size = config.texture.size;
-    const texture = new Uint32Array(size * size);
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const checker = (Math.floor(x / config.texture.checkerSize) + Math.floor(y / config.texture.checkerSize) & 1) === 0;
-        const centerX = x - size / 2;
-        const centerY = y - size / 2;
-        const radius = Math.sqrt(centerX * centerX + centerY * centerY);
-        const rings = Math.sin(radius * config.texture.ringFrequency) * 0.5 + 0.5;
-        const spokes = Math.sin(Math.atan2(centerY, centerX) * config.texture.spokeCount) * 0.5 + 0.5;
-        let position = checker ? rings * 0.4 : 0.4 + spokes * 0.4;
-        if (radius < config.texture.centerRadius) position = 0.85;
-        else if (radius < config.texture.borderRadius) position = 1;
-        texture[y * size + x] = samplePackedPalette(palette, position);
+  function validateSineScroller(config) {
+    for (const key of ["content", "fontFamily"]) assertString(config.text[key], `sineScroller.text.${key}`);
+    assertNumber(config.text.fontWeight, "sineScroller.text.fontWeight", { min: 100, max: 1e3, integer: true });
+    for (const key of ["fontSizeRatio", "maxFontSize", "characterWidthRatio"]) {
+      assertNumber(config.text[key], `sineScroller.text.${key}`, { min: Number.MIN_VALUE });
+    }
+    for (const key of ["shadowOffsetX", "shadowOffsetY"]) assertNumber(config.text[key], `sineScroller.text.${key}`);
+    assertNumber(config.wave.baseline, "sineScroller.wave.baseline", { min: 0, max: 1 });
+    assertNumber(config.wave.amplitude, "sineScroller.wave.amplitude", { min: 0, max: 1 });
+    assertNumber(config.wave.frequency, "sineScroller.wave.frequency", { min: Number.MIN_VALUE });
+    for (const key of ["scrollSpeed", "phaseSpeed", "colorCycleSpeed"]) {
+      assertNumber(config.motion[key], `sineScroller.motion.${key}`);
+    }
+    assertNumber(config.appearance.shadowAlpha, "sineScroller.appearance.shadowAlpha", { min: 0, max: 1 });
+    assertString(config.appearance.shadowColor, "sineScroller.appearance.shadowColor");
+    assertString(config.appearance.starColor, "sineScroller.appearance.starColor");
+    assertNumber(config.stars.seed, "sineScroller.stars.seed", { min: 0, max: 4294967295, integer: true });
+    assertNumber(config.stars.count, "sineScroller.stars.count", { min: 0, max: 5e3, integer: true });
+    for (const key of ["speed", "minDepth", "maxDepth", "minSize", "maxSize", "minAlpha", "maxAlpha"]) {
+      assertNumber(config.stars[key], `sineScroller.stars.${key}`, { min: 0 });
+    }
+    for (const [minimum, maximum] of [["minDepth", "maxDepth"], ["minSize", "maxSize"], ["minAlpha", "maxAlpha"]]) {
+      if (config.stars[maximum] < config.stars[minimum]) {
+        throw new RangeError(`sineScroller.stars.${maximum} must be at least ${minimum}.`);
       }
     }
-    return texture;
+    if (config.stars.maxAlpha > 1) throw new RangeError("sineScroller.stars.maxAlpha must be at most 1.");
   }
+
+  // src/effects/sine-scroller/skins.js
+  var SINE_SCROLLER_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/sine-scroller/profiles.js
+  var SINE_SCROLLER_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/sine-scroller/index.js
+  var sineScrollerDefinition = {
+    name: "sineScroller",
+    rendererFactory: createSineScrollerRenderer,
+    configDefaults: SINE_SCROLLER_DEFAULTS,
+    validate: validateSineScroller,
+    skins: SINE_SCROLLER_SKINS,
+    profiles: SINE_SCROLLER_PROFILES,
+    capabilities: {
+      // Skins change presentation only. The scroller *text*, *wave* shape, and
+      // *stars* field are algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
+
+  // src/effects/rotozoom/renderer.js
   function createRotozoomRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
@@ -1828,63 +2145,96 @@ void main() {
       }
     };
   }
+  function buildTexture(config, palette) {
+    const size = config.texture.size;
+    const texture = new Uint32Array(size * size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const checker = (Math.floor(x / config.texture.checkerSize) + Math.floor(y / config.texture.checkerSize) & 1) === 0;
+        const centerX = x - size / 2;
+        const centerY = y - size / 2;
+        const radius = Math.sqrt(centerX * centerX + centerY * centerY);
+        const rings = Math.sin(radius * config.texture.ringFrequency) * 0.5 + 0.5;
+        const spokes = Math.sin(Math.atan2(centerY, centerX) * config.texture.spokeCount) * 0.5 + 0.5;
+        let position = checker ? rings * 0.4 : 0.4 + spokes * 0.4;
+        if (radius < config.texture.centerRadius) position = 0.85;
+        else if (radius < config.texture.borderRadius) position = 1;
+        texture[y * size + x] = samplePackedPalette(palette, position);
+      }
+    }
+    return texture;
+  }
 
-  // src/effects/feedback.js
-  var FEEDBACK_DEFAULTS = createEffectDefaults({
-    render: { resolution: 1, smoothing: true },
+  // src/effects/rotozoom/config.js
+  var ROTOZOOM_DEFAULTS = createEffectDefaults({
+    render: { resolution: 0.5, smoothing: true },
     motion: {
       speed: 1,
-      orbitSpeedX: 0.6,
-      orbitSpeedY: 0.7,
-      polygonRotationSpeed: 1,
-      passRotationStep: 0.3,
-      colorCycleSpeed: 0.17
+      rotationSpeed: 0.8,
+      zoomBase: 1.2,
+      zoomAmplitude: 0.7,
+      zoomSpeed: 0.5
     },
     appearance: {
-      palette: ["#ff58d6", "#5ca8ff", "#60ffd0", "#ffe66d", "#ff58d6"],
-      colorCount: 360,
-      backgroundColor: "#000005",
-      strokeAlpha: 0.9
+      palette: ["#141e28", "#284d68", "#d47832", "#f0b050", "#00f0c8", "#000000"],
+      colorCount: 256,
+      backgroundColor: "#000000"
     },
-    geometry: {
-      sides: 5,
-      passes: 3,
-      radius: 40,
-      radiusOscillation: 14,
-      radiusOscillationSpeed: 3,
-      passSpacing: 8,
-      strokeWidth: 2,
-      shadowBlur: 18,
-      orbitX: 0.18,
-      orbitY: 0.18
-    },
-    feedback: {
-      alphaDecay: 0.93,
-      scale: 0.985,
-      rotation: 0.012,
-      fade: 0.96
+    texture: {
+      size: 256,
+      checkerSize: 32,
+      ringFrequency: 0.12,
+      spokeCount: 8,
+      centerRadius: 26,
+      borderRadius: 30
     }
   });
-  function normalizeFeedbackConfig(input) {
-    return normalizeEffectConfig("feedback", input, FEEDBACK_DEFAULTS, (config) => {
-      for (const key of ["orbitSpeedX", "orbitSpeedY", "polygonRotationSpeed", "passRotationStep", "colorCycleSpeed"]) {
-        assertNumber(config.motion[key], `feedback.motion.${key}`);
-      }
-      assertNumber(config.appearance.strokeAlpha, "feedback.appearance.strokeAlpha", { min: 0, max: 1 });
-      assertNumber(config.geometry.sides, "feedback.geometry.sides", { min: 3, max: 64, integer: true });
-      assertNumber(config.geometry.passes, "feedback.geometry.passes", { min: 1, max: 32, integer: true });
-      for (const key of ["radius", "radiusOscillation", "radiusOscillationSpeed", "passSpacing", "strokeWidth", "shadowBlur"]) {
-        assertNumber(config.geometry[key], `feedback.geometry.${key}`, { min: 0 });
-      }
-      for (const key of ["orbitX", "orbitY"]) {
-        assertNumber(config.geometry[key], `feedback.geometry.${key}`, { min: 0, max: 1 });
-      }
-      for (const key of ["alphaDecay", "scale", "fade"]) {
-        assertNumber(config.feedback[key], `feedback.feedback.${key}`, { min: 0, max: 1 });
-      }
-      assertNumber(config.feedback.rotation, "feedback.feedback.rotation");
-    });
+  function validateRotozoom(config) {
+    for (const key of ["rotationSpeed", "zoomAmplitude", "zoomSpeed"]) {
+      assertNumber(config.motion[key], `rotozoom.motion.${key}`);
+    }
+    assertNumber(config.motion.zoomBase, "rotozoom.motion.zoomBase", { min: Number.MIN_VALUE });
+    assertNumber(config.texture.size, "rotozoom.texture.size", { min: 16, max: 1024, integer: true });
+    assertNumber(config.texture.checkerSize, "rotozoom.texture.checkerSize", { min: 1, max: 512, integer: true });
+    assertNumber(config.texture.ringFrequency, "rotozoom.texture.ringFrequency", { min: 0 });
+    assertNumber(config.texture.spokeCount, "rotozoom.texture.spokeCount", { min: 1, max: 64, integer: true });
+    assertNumber(config.texture.centerRadius, "rotozoom.texture.centerRadius", { min: 0 });
+    assertNumber(config.texture.borderRadius, "rotozoom.texture.borderRadius", { min: config.texture.centerRadius });
   }
+
+  // src/effects/rotozoom/skins.js
+  var ROTOZOOM_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/rotozoom/profiles.js
+  var ROTOZOOM_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/rotozoom/index.js
+  var rotozoomDefinition = {
+    name: "rotozoom",
+    rendererFactory: createRotozoomRenderer,
+    configDefaults: ROTOZOOM_DEFAULTS,
+    validate: validateRotozoom,
+    skins: ROTOZOOM_SKINS,
+    profiles: ROTOZOOM_PROFILES,
+    capabilities: {
+      // Skins change presentation only. The procedural *texture* (checker, rings,
+      // spokes, radii) is algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
+
+  // src/effects/feedback/renderer.js
   function createFeedbackRenderer({ canvas, config }) {
     const output = getContext2D(canvas);
     const buffer = createDrawingBuffer();
@@ -1969,47 +2319,94 @@ void main() {
     };
   }
 
-  // src/effects/copper-bars.js
-  var DEFAULT_BARS = [
-    { yBase: 0.22, amplitude: 0.12, frequency: 0.7, phase: 0, height: 0.048, colorOffset: 0 },
-    { yBase: 0.4, amplitude: 0.1, frequency: 0.9, phase: 1, height: 0.063, colorOffset: 0.2 },
-    { yBase: 0.55, amplitude: 0.13, frequency: 0.6, phase: 2, height: 0.041, colorOffset: 0.4 },
-    { yBase: 0.7, amplitude: 0.11, frequency: 1, phase: 3, height: 0.074, colorOffset: 0.65 },
-    { yBase: 0.85, amplitude: 0.09, frequency: 0.8, phase: 4, height: 0.052, colorOffset: 0.85 }
-  ];
-  var COPPER_BARS_DEFAULTS = createEffectDefaults({
-    render: { resolution: 0.5, smoothing: true },
-    motion: { speed: 1, colorCycleSpeed: 0.06 },
-    appearance: {
-      palette: ["#ff244c", "#ffe844", "#28e880", "#35a8ff", "#dc4dff", "#ff244c"],
-      colorCount: 360,
-      backgroundColor: "#060812"
+  // src/effects/feedback/config.js
+  var FEEDBACK_DEFAULTS = createEffectDefaults({
+    render: { resolution: 1, smoothing: true },
+    motion: {
+      speed: 1,
+      orbitSpeedX: 0.6,
+      orbitSpeedY: 0.7,
+      polygonRotationSpeed: 1,
+      passRotationStep: 0.3,
+      colorCycleSpeed: 0.17
     },
-    bars: DEFAULT_BARS,
-    shading: {
-      glossyFalloff: 0.7,
-      highlightStrength: 90,
-      highlightWidth: 1.5
+    appearance: {
+      palette: ["#ff58d6", "#5ca8ff", "#60ffd0", "#ffe66d", "#ff58d6"],
+      colorCount: 360,
+      backgroundColor: "#000005",
+      strokeAlpha: 0.9
+    },
+    geometry: {
+      sides: 5,
+      passes: 3,
+      radius: 40,
+      radiusOscillation: 14,
+      radiusOscillationSpeed: 3,
+      passSpacing: 8,
+      strokeWidth: 2,
+      shadowBlur: 18,
+      orbitX: 0.18,
+      orbitY: 0.18
+    },
+    feedback: {
+      alphaDecay: 0.93,
+      scale: 0.985,
+      rotation: 0.012,
+      fade: 0.96
     }
   });
-  function normalizeCopperBarsConfig(input) {
-    return normalizeEffectConfig("copperBars", input, COPPER_BARS_DEFAULTS, (config) => {
-      if (!Array.isArray(config.bars) || config.bars.length < 1 || config.bars.length > 64) {
-        throw new RangeError("copperBars.bars must contain between 1 and 64 bars.");
-      }
-      config.bars.forEach((bar, index) => {
-        for (const key of ["yBase", "amplitude", "frequency", "phase", "height", "colorOffset"]) {
-          assertNumber(bar[key], `copperBars.bars[${index}].${key}`, {
-            min: ["amplitude", "frequency", "height"].includes(key) ? 0 : -Infinity
-          });
-        }
-      });
-      assertNumber(config.motion.colorCycleSpeed, "copperBars.motion.colorCycleSpeed");
-      assertNumber(config.shading.glossyFalloff, "copperBars.shading.glossyFalloff", { min: Number.MIN_VALUE });
-      assertNumber(config.shading.highlightStrength, "copperBars.shading.highlightStrength", { min: 0 });
-      assertNumber(config.shading.highlightWidth, "copperBars.shading.highlightWidth", { min: 0 });
-    });
+  function validateFeedback(config) {
+    for (const key of ["orbitSpeedX", "orbitSpeedY", "polygonRotationSpeed", "passRotationStep", "colorCycleSpeed"]) {
+      assertNumber(config.motion[key], `feedback.motion.${key}`);
+    }
+    assertNumber(config.appearance.strokeAlpha, "feedback.appearance.strokeAlpha", { min: 0, max: 1 });
+    assertNumber(config.geometry.sides, "feedback.geometry.sides", { min: 3, max: 64, integer: true });
+    assertNumber(config.geometry.passes, "feedback.geometry.passes", { min: 1, max: 32, integer: true });
+    for (const key of ["radius", "radiusOscillation", "radiusOscillationSpeed", "passSpacing", "strokeWidth", "shadowBlur"]) {
+      assertNumber(config.geometry[key], `feedback.geometry.${key}`, { min: 0 });
+    }
+    for (const key of ["orbitX", "orbitY"]) {
+      assertNumber(config.geometry[key], `feedback.geometry.${key}`, { min: 0, max: 1 });
+    }
+    for (const key of ["alphaDecay", "scale", "fade"]) {
+      assertNumber(config.feedback[key], `feedback.feedback.${key}`, { min: 0, max: 1 });
+    }
+    assertNumber(config.feedback.rotation, "feedback.feedback.rotation");
   }
+
+  // src/effects/feedback/skins.js
+  var FEEDBACK_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/feedback/profiles.js
+  var FEEDBACK_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/feedback/index.js
+  var feedbackDefinition = {
+    name: "feedback",
+    rendererFactory: createFeedbackRenderer,
+    configDefaults: FEEDBACK_DEFAULTS,
+    validate: validateFeedback,
+    skins: FEEDBACK_SKINS,
+    profiles: FEEDBACK_PROFILES,
+    capabilities: {
+      // Skins change presentation only. The polygon *geometry* and the recursive
+      // *feedback* loop are algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
+
+  // src/effects/copper-bars/renderer.js
   function createCopperBarsRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
@@ -2062,15 +2459,87 @@ void main() {
     };
   }
 
+  // src/effects/copper-bars/config.js
+  var DEFAULT_BARS = [
+    { yBase: 0.22, amplitude: 0.12, frequency: 0.7, phase: 0, height: 0.048, colorOffset: 0 },
+    { yBase: 0.4, amplitude: 0.1, frequency: 0.9, phase: 1, height: 0.063, colorOffset: 0.2 },
+    { yBase: 0.55, amplitude: 0.13, frequency: 0.6, phase: 2, height: 0.041, colorOffset: 0.4 },
+    { yBase: 0.7, amplitude: 0.11, frequency: 1, phase: 3, height: 0.074, colorOffset: 0.65 },
+    { yBase: 0.85, amplitude: 0.09, frequency: 0.8, phase: 4, height: 0.052, colorOffset: 0.85 }
+  ];
+  var COPPER_BARS_DEFAULTS = createEffectDefaults({
+    render: { resolution: 0.5, smoothing: true },
+    motion: { speed: 1, colorCycleSpeed: 0.06 },
+    appearance: {
+      palette: ["#ff244c", "#ffe844", "#28e880", "#35a8ff", "#dc4dff", "#ff244c"],
+      colorCount: 360,
+      backgroundColor: "#060812"
+    },
+    bars: DEFAULT_BARS,
+    shading: {
+      glossyFalloff: 0.7,
+      highlightStrength: 90,
+      highlightWidth: 1.5
+    }
+  });
+  function validateCopperBars(config) {
+    if (!Array.isArray(config.bars) || config.bars.length < 1 || config.bars.length > 64) {
+      throw new RangeError("copperBars.bars must contain between 1 and 64 bars.");
+    }
+    config.bars.forEach((bar, index) => {
+      for (const key of ["yBase", "amplitude", "frequency", "phase", "height", "colorOffset"]) {
+        assertNumber(bar[key], `copperBars.bars[${index}].${key}`, {
+          min: ["amplitude", "frequency", "height"].includes(key) ? 0 : -Infinity
+        });
+      }
+    });
+    assertNumber(config.motion.colorCycleSpeed, "copperBars.motion.colorCycleSpeed");
+    assertNumber(config.shading.glossyFalloff, "copperBars.shading.glossyFalloff", { min: Number.MIN_VALUE });
+    assertNumber(config.shading.highlightStrength, "copperBars.shading.highlightStrength", { min: 0 });
+    assertNumber(config.shading.highlightWidth, "copperBars.shading.highlightWidth", { min: 0 });
+  }
+
+  // src/effects/copper-bars/skins.js
+  var COPPER_BARS_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/copper-bars/profiles.js
+  var COPPER_BARS_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/copper-bars/index.js
+  var copperBarsDefinition = {
+    name: "copperBars",
+    rendererFactory: createCopperBarsRenderer,
+    configDefaults: COPPER_BARS_DEFAULTS,
+    validate: validateCopperBars,
+    skins: COPPER_BARS_SKINS,
+    profiles: COPPER_BARS_PROFILES,
+    capabilities: {
+      // Skins change presentation only. The bar *layout* and *shading* model are
+      // algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
+
   // browser-entry.js
-  installEffect("plasma", createPlasmaRenderer, normalizePlasmaConfig);
-  installEffect("fire", createFireRenderer, normalizeFireConfig);
-  installEffect("starfield", createStarfieldRenderer, normalizeStarfieldConfig);
-  installEffect("metaballs", createMetaballsRenderer, normalizeMetaballsConfig);
-  installEffect("tunnel", createTunnelRenderer, normalizeTunnelConfig);
-  installEffect("mandelbrot", createMandelbrotRenderer, normalizeMandelbrotConfig);
-  installEffect("sineScroller", createSineScrollerRenderer, normalizeSineScrollerConfig);
-  installEffect("rotozoom", createRotozoomRenderer, normalizeRotozoomConfig);
-  installEffect("feedback", createFeedbackRenderer, normalizeFeedbackConfig);
-  installEffect("copperBars", createCopperBarsRenderer, normalizeCopperBarsConfig);
+  installEffect(plasmaDefinition);
+  installEffect(fireDefinition);
+  installEffect(starfieldDefinition);
+  installEffect(metaballsDefinition);
+  installEffect(tunnelDefinition);
+  installEffect(mandelbrotDefinition);
+  installEffect(sineScrollerDefinition);
+  installEffect(rotozoomDefinition);
+  installEffect(feedbackDefinition);
+  installEffect(copperBarsDefinition);
 })();

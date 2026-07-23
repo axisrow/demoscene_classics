@@ -1,6 +1,6 @@
 {
   "name": "demoscene-classics",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
   "description": "Beginner-friendly browser scripts for classic Canvas 2D demoscene effects.",

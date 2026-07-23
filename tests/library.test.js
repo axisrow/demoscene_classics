@@ -3,27 +3,21 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 
-import { mandelbrotZoom, renderMandelbrotPixels } from '../src/effects/mandelbrot-core.js';
+import { mandelbrotZoom, renderMandelbrotPixels } from '../src/effects/mandelbrot/mandelbrot-core.js';
 import { buildGradientPalette, packHexColor, packRgb } from '../src/effects/utils.js';
 
+// [publicName, definition module, definition export, standalone filename, config defaults export]
 const EFFECTS = [
-  ['plasma', 'plasma.js'], ['fire', 'fire.js'], ['starfield', 'starfield.js'],
-  ['metaballs', 'metaballs.js'], ['tunnel', 'tunnel.js'], ['mandelbrot', 'mandelbrot.js'],
-  ['sineScroller', 'sine-scroller.js'], ['rotozoom', 'rotozoom.js'],
-  ['feedback', 'feedback.js'], ['copperBars', 'copper-bars.js']
-];
-
-const EFFECT_MODULES = [
-  ['plasma', 'plasma.js', 'normalizePlasmaConfig', 'PLASMA_DEFAULTS'],
-  ['fire', 'fire.js', 'normalizeFireConfig', 'FIRE_DEFAULTS'],
-  ['starfield', 'starfield.js', 'normalizeStarfieldConfig', 'STARFIELD_DEFAULTS'],
-  ['metaballs', 'metaballs.js', 'normalizeMetaballsConfig', 'METABALLS_DEFAULTS'],
-  ['tunnel', 'tunnel.js', 'normalizeTunnelConfig', 'TUNNEL_DEFAULTS'],
-  ['mandelbrot', 'mandelbrot.js', 'normalizeMandelbrotConfig', 'MANDELBROT_DEFAULTS'],
-  ['sineScroller', 'sine-scroller.js', 'normalizeSineScrollerConfig', 'SINE_SCROLLER_DEFAULTS'],
-  ['rotozoom', 'rotozoom.js', 'normalizeRotozoomConfig', 'ROTOZOOM_DEFAULTS'],
-  ['feedback', 'feedback.js', 'normalizeFeedbackConfig', 'FEEDBACK_DEFAULTS'],
-  ['copperBars', 'copper-bars.js', 'normalizeCopperBarsConfig', 'COPPER_BARS_DEFAULTS']
+  ['plasma', 'plasma/index.js', 'plasmaDefinition', 'plasma.js', 'PLASMA_DEFAULTS'],
+  ['fire', 'fire/index.js', 'fireDefinition', 'fire.js', 'FIRE_DEFAULTS'],
+  ['starfield', 'starfield/index.js', 'starfieldDefinition', 'starfield.js', 'STARFIELD_DEFAULTS'],
+  ['metaballs', 'metaballs/index.js', 'metaballsDefinition', 'metaballs.js', 'METABALLS_DEFAULTS'],
+  ['tunnel', 'tunnel/index.js', 'tunnelDefinition', 'tunnel.js', 'TUNNEL_DEFAULTS'],
+  ['mandelbrot', 'mandelbrot/index.js', 'mandelbrotDefinition', 'mandelbrot.js', 'MANDELBROT_DEFAULTS'],
+  ['sineScroller', 'sine-scroller/index.js', 'sineScrollerDefinition', 'sine-scroller.js', 'SINE_SCROLLER_DEFAULTS'],
+  ['rotozoom', 'rotozoom/index.js', 'rotozoomDefinition', 'rotozoom.js', 'ROTOZOOM_DEFAULTS'],
+  ['feedback', 'feedback/index.js', 'feedbackDefinition', 'feedback.js', 'FEEDBACK_DEFAULTS'],
+  ['copperBars', 'copper-bars/index.js', 'copperBarsDefinition', 'copper-bars.js', 'COPPER_BARS_DEFAULTS']
 ];
 
 class MockContext {
@@ -156,7 +150,7 @@ class MockCanvas {
   removeEventListener(type) { this.listeners.delete(type); }
 }
 
-function createEnvironment({ webgl = false, shaderFailure = false } = {}) {
+function createEnvironment({ webgl = false, shaderFailure = false, matchMedia = null } = {}) {
   let nextFrameId = 1;
   let frames = [];
   const canvases = [];
@@ -195,6 +189,7 @@ function createEnvironment({ webgl = false, shaderFailure = false } = {}) {
     },
     cancelAnimationFrame(id) { frames = frames.filter((frame) => frame.id !== id); }
   };
+  if (matchMedia) sandbox.matchMedia = matchMedia;
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
@@ -224,17 +219,6 @@ function valueAtPath(value, path) {
   return path.reduce((current, key) => current[key], value);
 }
 
-function skinAtPath(path, value) {
-  return path.reduceRight((current, key) => ({ [key]: current }), value);
-}
-
-function publicLeaves(value, path = []) {
-  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-    return Object.entries(value).flatMap(([key, item]) => publicLeaves(item, [...path, key]));
-  }
-  return [[path, value]];
-}
-
 function assertDeepFrozen(value) {
   if (value === null || typeof value !== 'object') return;
   assert.equal(Object.isFrozen(value), true);
@@ -250,11 +234,15 @@ function hashBytes(bytes) {
   return hash.toString(16).padStart(8, '0');
 }
 
-async function rendererSignature(name, filename, skin = {}) {
+// Render an effect from a standalone bundle under a v3 descriptor and return a
+// stable signature string. The default descriptor {} resolves to
+// classic/fullscreen/desktop, which must remain visually identical to the v2
+// baseline (this structural PR must not redesign any effect).
+async function rendererSignature(name, filename, descriptor = {}) {
   const environment = createEnvironment();
   await loadBundle(`../dist/effects/${filename}`, environment);
   const canvas = environment.createCanvas('#demo', 48, 32);
-  environment.sandbox.Demoscene[name](canvas, skin);
+  environment.sandbox.Demoscene[name](canvas, descriptor);
   for (const timestamp of [0, 17, 34, 51]) environment.flush(timestamp);
   const buffer = environment.canvases.find((candidate) => candidate !== canvas);
   return buffer.context.lastImage
@@ -262,25 +250,55 @@ async function rendererSignature(name, filename, skin = {}) {
     : `vector:${buffer.context.traceHash.toString(16).padStart(8, '0')}`;
 }
 
-test('standalone bundles expose API v2 controllers for every effect', async () => {
-  for (const [name, filename] of EFFECTS) {
+test('every effect exposes a complete definition with the v3 contract shape', async () => {
+  for (const [name, module, exportName] of EFFECTS) {
+    const definition = (await import(`../src/effects/${module}`))[exportName];
+    assert.equal(definition.name, name, `${name} definition name`);
+    assert.equal(typeof definition.rendererFactory, 'function', `${name} rendererFactory`);
+    assert.ok(definition.configDefaults && typeof definition.configDefaults === 'object', `${name} configDefaults`);
+    assert.equal(typeof definition.validate, 'function', `${name} validate`);
+    assert.ok(definition.skins && typeof definition.skins === 'object', `${name} skins`);
+    assert.ok('classic' in definition.skins, `${name} must ship a 'classic' skin`);
+    assert.ok(definition.profiles && definition.profiles.surfaces && definition.profiles.devices, `${name} profiles`);
+    assert.ok(definition.profiles.surfaces.fullscreen !== undefined, `${name} fullscreen surface`);
+    assert.ok(definition.profiles.surfaces.preview !== undefined, `${name} preview surface`);
+    assert.ok(definition.profiles.devices.desktop !== undefined, `${name} desktop device`);
+    assert.ok(definition.profiles.devices.mobile !== undefined, `${name} mobile device`);
+    assert.ok(definition.capabilities?.skinAllow instanceof Set, `${name} capabilities.skinAllow`);
+    for (const group of ['runtime', 'render', 'motion', 'appearance']) {
+      assert.ok(definition.capabilities.skinAllow.has(group), `${name} skinAllow must include ${group}`);
+    }
+  }
+});
+
+test('standalone bundles expose v3 controllers for every effect', async () => {
+  for (const [name, , , filename] of EFFECTS) {
     const environment = createEnvironment();
     await loadBundle(`../dist/effects/${filename}`, environment);
     const canvas = environment.createCanvas('#demo', 48, 32);
     const controller = environment.sandbox.Demoscene[name](canvas, {
-      runtime: { autoStart: false },
-      render: { resolution: 0.25 }
+      config: { runtime: { autoStart: false }, render: { resolution: 0.25 } }
     });
     assert.equal(typeof controller.start, 'function');
     assert.equal(typeof controller.stop, 'function');
     assert.equal(typeof controller.resize, 'function');
     assert.equal(typeof controller.renderOnce, 'function');
     assert.equal(typeof controller.getConfig, 'function');
+    assert.equal(typeof controller.getSelection, 'function');
     assert.equal(typeof controller.getStats, 'function');
     assert.equal(typeof controller.destroy, 'function');
     controller.renderOnce(0).start().stop().resize();
     controller.destroy();
   }
+});
+
+test('the aggregate bundle installs all ten effects on one namespace', async () => {
+  const environment = createEnvironment();
+  await loadBundle('../dist/demoscene.js', environment);
+  // Compare as joined strings to avoid cross-realm string reference issues.
+  const installed = Object.keys(environment.sandbox.Demoscene).sort().join(',');
+  const expected = EFFECTS.map(([name]) => name).sort().join(',');
+  assert.equal(installed, expected);
 });
 
 test('complete and standalone bundles share one scheduler', async () => {
@@ -297,157 +315,218 @@ test('complete and standalone bundles share one scheduler', async () => {
   }
 });
 
-test('pauseWhenHidden controls viewport scheduling without a quality preset', async () => {
+test('the default descriptor resolves to classic/fullscreen/desktop and auto', async () => {
   const environment = createEnvironment();
   await loadBundle('../dist/effects/plasma.js', environment);
   const canvas = environment.createCanvas('#demo', 48, 32);
-  environment.sandbox.Demoscene.plasma(canvas);
-  environment.intersectionObservers[0].trigger(false);
-  environment.flush(0);
-  assert.equal(environment.frameCount(), 0);
-  environment.intersectionObservers[0].trigger(true);
-  assert.equal(environment.frameCount(), 1);
+  const controller = environment.sandbox.Demoscene.plasma(canvas, {});
+  const selection = controller.getSelection();
+  // Compare field-by-field: the selection object is created inside the bundle's
+  // vm realm, so deepStrictEqual across realms fails on reference identity.
+  assert.strictEqual(selection.requestedSkin, 'classic');
+  assert.strictEqual(selection.preset, 'classic');
+  assert.strictEqual(selection.surface, 'fullscreen');
+  assert.strictEqual(selection.requestedDevice, 'auto');
+  assert.strictEqual(selection.resolvedDevice, 'desktop');
+  assert.equal(Object.isFrozen(selection), true);
 });
 
-const CONFIG_CASES = [
-  ['plasma', { field: { frequencies: [0.08, 0.06, 0.04, 1.2] }, appearance: { colorCount: 32 } }, ['field', 'frequencies', 0], 0.08],
-  ['fire', { simulation: { seed: 7, sourceDensity: 0.4 } }, ['simulation', 'seed'], 7],
-  ['starfield', { particles: { particleCount: 42 } }, ['particles', 'particleCount'], 42],
-  ['metaballs', { field: { pointCount: 7 } }, ['field', 'pointCount'], 7],
-  ['tunnel', { geometry: { angularFrequency: 9 } }, ['geometry', 'angularFrequency'], 9],
-  ['mandelbrot', { render: { backend: 'auto' }, algorithm: { maxIterations: 120 } }, ['render', 'backend'], 'auto'],
-  ['sineScroller', { stars: { count: 12 } }, ['stars', 'count'], 12],
-  ['rotozoom', { texture: { spokeCount: 12 } }, ['texture', 'spokeCount'], 12],
-  ['feedback', { geometry: { sides: 8 } }, ['geometry', 'sides'], 8],
-  ['copperBars', { shading: { highlightStrength: 40 } }, ['shading', 'highlightStrength'], 40]
-];
+test('device auto resolves to mobile on coarse/narrow viewports and stays desktop otherwise', async () => {
+  for (const { matchMedia, expected } of [
+    { matchMedia: () => ({ matches: false }), expected: 'desktop' },
+    { matchMedia: (query) => ({ matches: query === '(max-width: 767px)' }), expected: 'mobile' },
+    { matchMedia: (query) => ({ matches: query === '(hover: none) and (pointer: coarse)' }), expected: 'mobile' }
+  ]) {
+    const environment = createEnvironment({ matchMedia });
+    await loadBundle('../dist/effects/plasma.js', environment);
+    const canvas = environment.createCanvas('#demo', 48, 32);
+    const controller = environment.sandbox.Demoscene.plasma(canvas, { device: 'auto' });
+    assert.equal(controller.getSelection().resolvedDevice, expected);
+  }
+  // No matchMedia available -> desktop.
+  const environment = createEnvironment();
+  await loadBundle('../dist/effects/plasma.js', environment);
+  const canvas = environment.createCanvas('#demo', 48, 32);
+  assert.equal(
+    environment.sandbox.Demoscene.plasma(canvas, { device: 'auto' }).getSelection().resolvedDevice,
+    'desktop'
+  );
+});
 
-test('all ten effects accept structured, immutable skin values', async () => {
+test('explicit device values bypass auto-detection', async () => {
+  const environment = createEnvironment({ matchMedia: () => ({ matches: true }) });
+  await loadBundle('../dist/effects/plasma.js', environment);
+  const canvas = environment.createCanvas('#demo', 48, 32);
+  const desktop = environment.sandbox.Demoscene.plasma(environment.createCanvas('#a', 30, 20), { device: 'desktop' });
+  const mobile = environment.sandbox.Demoscene.plasma(environment.createCanvas('#b', 30, 20), { device: 'mobile' });
+  assert.equal(desktop.getSelection().resolvedDevice, 'desktop');
+  assert.equal(mobile.getSelection().resolvedDevice, 'mobile');
+  assert.equal(desktop.getSelection().requestedDevice, 'desktop');
+  assert.equal(mobile.getSelection().requestedDevice, 'mobile');
+});
+
+test('merge precedence: defaults -> skin preset -> overrides -> surface -> device -> explicit config', async () => {
+  const environment = createEnvironment();
+  await loadBundle('../dist/effects/plasma.js', environment);
+
+  // Defaults: plasma render.resolution defaults to 0.25.
+  const baseline = environment.sandbox.Demoscene.plasma(
+    environment.createCanvas(null, 32, 20), { config: { runtime: { autoStart: false } } }
+  ).getConfig();
+  assert.equal(baseline.render.resolution, 0.25);
+
+  // Explicit config wins over every preceding layer (the expert escape hatch).
+  const explicit = environment.sandbox.Demoscene.plasma(
+    environment.createCanvas(null, 32, 20), { config: { runtime: { autoStart: false }, render: { resolution: 0.5 } } }
+  ).getConfig();
+  assert.equal(explicit.render.resolution, 0.5);
+
+  // Custom skin overrides land between the preset and the surface/device layers.
+  const skinned = environment.sandbox.Demoscene.plasma(
+    environment.createCanvas(null, 32, 20),
+    { skin: { preset: 'classic', overrides: { motion: { speed: 2.5 } } }, config: { runtime: { autoStart: false } } }
+  ).getConfig();
+  assert.equal(skinned.motion.speed, 2.5);
+});
+
+test('string and custom-object skin selection both resolve to the same preset', async () => {
+  const environment = createEnvironment();
+  await loadBundle('../dist/effects/plasma.js', environment);
+  const byString = environment.sandbox.Demoscene.plasma(
+    environment.createCanvas(null, 32, 20), { skin: 'classic' }
+  ).getSelection();
+  const byObject = environment.sandbox.Demoscene.plasma(
+    environment.createCanvas(null, 32, 20), { skin: { preset: 'classic' } }
+  ).getSelection();
+  // Both resolve to the same preset/surface/device...
+  assert.equal(byString.preset, 'classic');
+  assert.equal(byObject.preset, 'classic');
+  assert.equal(byString.surface, byObject.surface);
+  assert.equal(byString.resolvedDevice, byObject.resolvedDevice);
+  // ...but requestedSkin echoes what the caller passed: a string vs the object form.
+  assert.strictEqual(byString.requestedSkin, 'classic');
+  assert.strictEqual(byObject.requestedSkin.preset, 'classic');
+});
+
+test('unknown skin, surface, and device values fail with full paths', async () => {
   const environment = createEnvironment();
   await loadBundle('../dist/demoscene.js', environment);
-  for (const [name, skin, path, expected] of CONFIG_CASES) {
-    const controller = environment.sandbox.Demoscene[name](
-      environment.createCanvas(null, 32, 20),
-      { runtime: { autoStart: false }, ...skin }
-    );
-    const first = controller.getConfig();
-    assert.equal(path.reduce((value, key) => value[key], first), expected, name);
-    first.runtime.maxFps = 1;
-    assert.equal(controller.getConfig().runtime.maxFps, 60, `${name} config leaked`);
-    controller.renderOnce(0);
-  }
-
-  const supplied = {
-    runtime: { autoStart: false, maxFps: 24 },
-    appearance: { palette: ['#000', '#fff'] }
-  };
-  const cloned = environment.sandbox.Demoscene.plasma(
-    environment.createCanvas(null, 32, 20),
-    supplied
+  const canvas = environment.createCanvas('#demo', 48, 32);
+  assert.throws(() => environment.sandbox.Demoscene.plasma(canvas, { skin: 'neon' }), /unknown skin 'neon'/);
+  assert.throws(
+    () => environment.sandbox.Demoscene.plasma(canvas, { skin: { preset: 'nope' } }),
+    /unknown skin preset 'nope'/
   );
-  supplied.runtime.maxFps = 1;
-  supplied.appearance.palette[0] = '#f00';
-  assert.equal(cloned.getConfig().runtime.maxFps, 24);
-  assert.equal(cloned.getConfig().appearance.palette[0], '#000');
+  assert.throws(() => environment.sandbox.Demoscene.plasma(canvas, { surface: 'windowed' }), /unknown surface 'windowed'/);
+  assert.throws(() => environment.sandbox.Demoscene.plasma(canvas, { device: 'tablet' }), /unknown device 'tablet'/);
+  assert.throws(() => environment.sandbox.Demoscene.plasma(canvas, { colour: 'red' }), /Unknown descriptor field: plasma\.colour/);
+  assert.throws(
+    () => environment.sandbox.Demoscene.plasma(canvas, { skin: { overrides: 1 } }),
+    /plasma\.skin\.overrides must be an object/
+  );
 });
 
-test('every documented public option is accepted, normalized and deeply frozen', async () => {
-  for (const [name, filename, normalizerName, defaultsName] of EFFECT_MODULES) {
-    const module = await import(`../src/effects/${filename}`);
-    const normalize = module[normalizerName];
-    const defaults = module[defaultsName];
-    for (const [path, value] of publicLeaves(defaults)) {
-      const normalized = normalize(skinAtPath(path, value));
-      assert.deepEqual(valueAtPath(normalized, path), value, `${name}.${path.join('.')}`);
-      assertDeepFrozen(normalized);
-    }
+test('skin overrides outside the declared visual paths are rejected', async () => {
+  const environment = createEnvironment();
+  await loadBundle('../dist/demoscene.js', environment);
+  const canvas = environment.createCanvas('#demo', 48, 32);
+  // Algorithmic groups (field/simulation/geometry/...) are out of scope for a skin.
+  assert.throws(
+    () => environment.sandbox.Demoscene.plasma(canvas, { skin: { overrides: { field: { pointCount: 3 } } } }),
+    /out of scope at 'field'/
+  );
+  assert.throws(
+    () => environment.sandbox.Demoscene.fire(canvas, { skin: { overrides: { simulation: { seed: 1 } } } }),
+    /out of scope at 'simulation'/
+  );
+  // ...but the same values are accepted under the explicit config escape hatch.
+  assert.doesNotThrow(() => environment.sandbox.Demoscene.fire(canvas, { config: { simulation: { seed: 1 } } }));
+});
+
+test('caller input is cloned and never mutated, and resolved config is deeply frozen', async () => {
+  const environment = createEnvironment();
+  await loadBundle('../dist/demoscene.js', environment);
+  const supplied = {
+    skin: { preset: 'classic', overrides: { appearance: { palette: ['#000', '#fff'] } } },
+    config: { runtime: { autoStart: false, maxFps: 24 }, field: { radialCenterX: 0.25 } }
+  };
+  const controller = environment.sandbox.Demoscene.plasma(environment.createCanvas(null, 32, 20), supplied);
+  const config = controller.getConfig();
+
+  // Mutating caller input after mount must not affect the resolved config.
+  supplied.config.runtime.maxFps = 1;
+  supplied.config.field.radialCenterX = 0.99;
+  supplied.skin.overrides.appearance.palette[0] = '#f00';
+  assert.equal(config.runtime.maxFps, 24);
+  assert.equal(config.field.radialCenterX, 0.25);
+  assert.equal(config.appearance.palette[0], '#000');
+
+  // getConfig() returns the fully resolved, deeply frozen configuration. It is
+  // immutable, so attempts to mutate it cannot leak back into the live config.
+  assert.equal(Object.isFrozen(config), true);
+  assertDeepFrozen(config);
+  assert.equal(Object.isFrozen(controller.getConfig()), true);
+  assert.equal(controller.getConfig().runtime.maxFps, 24);
+  assert.equal(controller.getConfig().field.radialCenterX, 0.25);
+});
+
+test('explicit config is validated with full paths and rejects unknown keys', async () => {
+  const environment = createEnvironment();
+  await loadBundle('../dist/demoscene.js', environment);
+  const canvas = environment.createCanvas('#demo', 48, 32);
+  assert.throws(
+    () => environment.sandbox.Demoscene.plasma(canvas, { config: { maxFps: 30 } }),
+    /Unknown option: plasma\.maxFps/
+  );
+  assert.throws(
+    () => environment.sandbox.Demoscene.mandelbrot(canvas, { config: { camera: { minZom: 10 } } }),
+    /mandelbrot\.camera\.minZom/
+  );
+  assert.throws(
+    () => environment.sandbox.Demoscene.mandelbrot(canvas, { config: { appearance: { paletteMode: 'sine' } } }),
+    /mandelbrot\.appearance\.paletteMode/
+  );
+  assert.throws(
+    () => environment.sandbox.Demoscene.plasma(canvas, { config: { render: { resolution: 0.05 } } }),
+    /plasma\.render\.resolution/
+  );
+  assert.throws(
+    () => environment.sandbox.Demoscene.starfield(canvas, { config: { particles: { particleCount: 10001 } } }),
+    /starfield\.particles\.particleCount/
+  );
+  assert.throws(
+    () => environment.sandbox.Demoscene.metaballs(canvas, { config: { field: { pointCount: 3, points: [] } } }),
+    /cannot be used together/
+  );
+});
+
+test('legacy v2 flat options fail everywhere with an actionable migration message', async () => {
+  const environment = createEnvironment();
+  await loadBundle('../dist/demoscene.js', environment);
+  const canvas = environment.createCanvas('#demo', 48, 32);
+  // Every legacy top-level group is rejected, naming the offending key and the escape hatch.
+  for (const [name, options] of [
+    ['plasma', { render: { resolution: 0.5 } }],
+    ['fire', { simulation: { seed: 7 } }],
+    ['starfield', { particles: { particleCount: 42 } }],
+    ['metaballs', { field: { pointCount: 7 } }],
+    ['mandelbrot', { camera: { centerX: -0.16 } }],
+    ['sineScroller', { stars: { count: 12 } }],
+    ['copperBars', { bars: [] }]
+  ]) {
+    assert.throws(
+      () => environment.sandbox.Demoscene[name](canvas, options),
+      (error) => /legacy v2 flat options/.test(error.message)
+        && /config/.test(error.message)
+        && error.message.includes(name),
+      `${name} legacy v2 object must fail with a migration hint`
+    );
   }
 });
 
-const CUSTOM_PALETTE = ['#001122', '#38c878', '#f2eadc'];
-const RENDERER_VARIANTS = {
-  plasma: {
-    render: { resolution: 0.4 }, motion: { speed: 1.7 },
-    appearance: { palette: CUSTOM_PALETTE, colorCount: 17 },
-    field: { frequencies: [0.07, 0.05, 0.03, 1.4] }
-  },
-  fire: {
-    render: { resolution: 0.4 }, motion: { speed: 1.7 },
-    appearance: { palette: CUSTOM_PALETTE, colorCount: 17 },
-    simulation: { seed: 7, sourceDensity: 0.3, sourceIntensity: 220 }
-  },
-  starfield: {
-    render: { resolution: 0.4 }, motion: { speed: 1.7 },
-    appearance: { palette: CUSTOM_PALETTE, colorCount: 17 },
-    particles: { seed: 7, particleCount: 42 }
-  },
-  metaballs: {
-    render: { resolution: 0.4 }, motion: { speed: 1.7 },
-    appearance: { palette: CUSTOM_PALETTE, colorCount: 17 },
-    field: { pointCount: 7, fieldStrength: 2.2 }
-  },
-  tunnel: {
-    render: { resolution: 0.4 }, motion: { speed: 1.7 },
-    appearance: { palette: CUSTOM_PALETTE, colorCount: 17 },
-    geometry: { angularFrequency: 9 }
-  },
-  mandelbrot: {
-    render: { resolution: 0.4 }, motion: { speed: 1.7 },
-    appearance: {
-      palette: CUSTOM_PALETTE, colorCount: 17, interiorColor: '#001122'
-    },
-    camera: { centerX: -0.16, centerY: 1.04, minZoom: 2, maxZoom: 8000 }
-  },
-  sineScroller: {
-    render: { resolution: 0.4 }, motion: { speed: 1.7 },
-    appearance: { palette: CUSTOM_PALETTE, colorCount: 17 },
-    text: { content: 'API V2 ' }, stars: { seed: 7, count: 12 }
-  },
-  rotozoom: {
-    render: { resolution: 0.4 }, motion: { speed: 1.7 },
-    appearance: { palette: CUSTOM_PALETTE, colorCount: 17 },
-    texture: { checkerSize: 11, spokeCount: 12 }
-  },
-  feedback: {
-    render: { resolution: 0.4 }, motion: { speed: 1.7 },
-    appearance: { palette: CUSTOM_PALETTE, colorCount: 17 },
-    geometry: { sides: 8, passes: 2 }
-  },
-  copperBars: {
-    render: { resolution: 0.4 }, motion: { speed: 1.7 },
-    appearance: { palette: CUSTOM_PALETTE, colorCount: 17 },
-    bars: [{
-      yBase: 0.5, amplitude: 0.15, frequency: 1.1, phase: 0.3,
-      height: 0.08, colorOffset: 0.4
-    }]
-  }
-};
-
-test('skin values change the actual renderer for all ten effects', async () => {
-  for (const [name, filename] of EFFECTS) {
-    const classic = await rendererSignature(name, filename);
-    const skinned = await rendererSignature(name, filename, RENDERER_VARIANTS[name]);
-    assert.notEqual(skinned, classic, name);
-  }
-});
-
-test('render.resolution controls the real buffer for every effect', async () => {
-  for (const [name, filename] of EFFECTS) {
-    const environment = createEnvironment();
-    await loadBundle(`../dist/effects/${filename}`, environment);
-    const canvas = environment.createCanvas('#demo', 40, 24);
-    environment.sandbox.Demoscene[name](canvas, {
-      runtime: { autoStart: false },
-      render: { resolution: 0.5 }
-    }).renderOnce(0);
-    const buffer = environment.canvases.find((candidate) => candidate !== canvas);
-    assert.deepEqual([buffer.width, buffer.height], [20, 12], name);
-  }
-});
-
-test('classic default frames remain pixel-stable', async () => {
+test('classic default frames remain pixel-stable and unchanged from the v2 baseline', async () => {
   const snapshots = {};
-  for (const [name, filename] of EFFECTS) {
+  for (const [name, , , filename] of EFFECTS) {
     snapshots[name] = await rendererSignature(name, filename);
   }
   assert.deepEqual(snapshots, {
@@ -464,88 +543,84 @@ test('classic default frames remain pixel-stable', async () => {
   });
 });
 
-test('legacy flat options and unknown nested keys fail with full paths', async () => {
-  const environment = createEnvironment();
-  await loadBundle('../dist/demoscene.js', environment);
-  const canvas = environment.createCanvas('#demo', 48, 32);
-  assert.throws(() => environment.sandbox.Demoscene.plasma(canvas, { quality: 'preview' }), /plasma\.quality/);
-  assert.throws(() => environment.sandbox.Demoscene.plasma(canvas, { maxFps: 30 }), /plasma\.maxFps/);
-  assert.throws(
-    () => environment.sandbox.Demoscene.mandelbrot(canvas, { appearance: { paletteMode: 'sine' } }),
-    /mandelbrot\.appearance\.paletteMode/
-  );
-  assert.throws(
-    () => environment.sandbox.Demoscene.mandelbrot(canvas, { appearance: { palette: ['black', '#fff'] } }),
-    /mandelbrot\.appearance\.palette\[0\]/
-  );
-  assert.throws(
-    () => environment.sandbox.Demoscene.mandelbrot(canvas, { camera: { minZom: 10 } }),
-    /mandelbrot\.camera\.minZom/
-  );
-  assert.throws(
-    () => environment.sandbox.Demoscene.mandelbrot(canvas, { render: { resolution: 0.05 } }),
-    /mandelbrot\.render\.resolution/
-  );
-  assert.throws(
-    () => environment.sandbox.Demoscene.mandelbrot(canvas, { render: { backend: 'webgpu' } }),
-    /mandelbrot\.render\.backend/
-  );
-  assert.throws(
-    () => environment.sandbox.Demoscene.metaballs(canvas, { field: { pointCount: 3, points: [] } }),
-    /cannot be used together/
-  );
-  assert.throws(
-    () => environment.sandbox.Demoscene.starfield(canvas, { particles: { particleCount: 10001 } }),
-    /starfield\.particles\.particleCount/
-  );
-  assert.throws(
-    () => environment.sandbox.Demoscene.metaballs(canvas, {
-      field: { points: Array.from({ length: 65 }, () => ({})) }
-    }),
-    /between 1 and 64 points/
-  );
-  assert.throws(
-    () => environment.sandbox.Demoscene.copperBars(canvas, {
-      bars: Array.from({ length: 65 }, () => ({
-        yBase: 0.5, amplitude: 0.1, frequency: 1, phase: 0, height: 0.1, colorOffset: 0
-      }))
-    }),
-    /between 1 and 64 bars/
-  );
-  assert.throws(
-    () => environment.sandbox.Demoscene.plasma(canvas, { appearance: { colorCount: 4097 } }),
-    /plasma\.appearance\.colorCount/
-  );
-  assert.throws(
-    () => environment.sandbox.Demoscene.plasma(canvas, {
-      appearance: { palette: Array.from({ length: 65 }, () => '#000') }
-    }),
-    /between 2 and 64 colours/
-  );
+// Four-profile contact sheet. In this structural PR the surface/device profile
+// overlays are intentionally empty (#3 owns responsive budgets), so every
+// desktop/mobile x preview/fullscreen profile must produce the SAME frame as
+// the classic desktop/fullscreen baseline. This is the before/after proof that
+// the v3 migration did not redesign any effect.
+test('four-profile contact sheet: empty profiles are visually identical to classic', async () => {
+  const PROFILES = [
+    {},
+    { surface: 'preview' },
+    { device: 'mobile' },
+    { surface: 'preview', device: 'mobile' }
+  ];
+  for (const [name, , , filename] of EFFECTS) {
+    const baseline = await rendererSignature(name, filename);
+    for (const [index, descriptor] of PROFILES.entries()) {
+      const signature = await rendererSignature(name, filename, descriptor);
+      assert.equal(signature, baseline,
+        `${name} profile ${JSON.stringify(descriptor)} (index ${index}) drifted from classic`);
+    }
+  }
 });
 
-test('pixelRatio, resolution and renderOnce produce an exact static backing buffer', async () => {
-  const environment = createEnvironment();
-  await loadBundle('../dist/effects/mandelbrot.js', environment);
-  const canvas = environment.createCanvas('#demo', 100, 60);
-  const controller = environment.sandbox.Demoscene.mandelbrot(canvas, {
-    runtime: { autoStart: false, pixelRatio: 1.5 },
-    render: { resolution: 0.25, smoothing: true },
-    camera: { minZoom: 4000, maxZoom: 250000 }
+test('explicit config changes the actual renderer for all ten effects', async () => {
+  const CUSTOM_PALETTE = ['#001122', '#38c878', '#f2eadc'];
+  const variants = {
+    plasma: { field: { frequencies: [0.08, 0.06, 0.04, 1.2] }, appearance: { colorCount: 32 } },
+    fire: { simulation: { seed: 7, sourceDensity: 0.4 } },
+    starfield: { particles: { particleCount: 42 } },
+    metaballs: { motion: { speed: 1.7 }, appearance: { palette: CUSTOM_PALETTE, colorCount: 17 } },
+    tunnel: { geometry: { angularFrequency: 9 } },
+    mandelbrot: { render: { backend: 'auto' }, algorithm: { maxIterations: 120 } },
+    sineScroller: { stars: { count: 12 } },
+    rotozoom: { motion: { speed: 1.7 }, appearance: { palette: CUSTOM_PALETTE, colorCount: 17 } },
+    feedback: { geometry: { sides: 8 } },
+    copperBars: { shading: { highlightStrength: 40 } }
+  };
+  for (const [name, , , filename] of EFFECTS) {
+    const classic = await rendererSignature(name, filename);
+    const changed = await rendererSignature(name, filename, { config: variants[name] });
+    assert.notEqual(changed, classic, name);
+  }
+  // Custom-object skin overrides must also change the renderer (via appearance).
+  const skinned = await rendererSignature('plasma', 'plasma.js', {
+    skin: { preset: 'classic', overrides: { appearance: { palette: CUSTOM_PALETTE, colorCount: 17 } } }
   });
-  controller.renderOnce(0);
-  const offscreen = environment.canvases.find((candidate) => candidate !== canvas);
-  assert.deepEqual([canvas.width, canvas.height], [150, 90]);
-  assert.deepEqual([offscreen.width, offscreen.height], [37, 22]);
-  assert.equal(canvas.context.imageSmoothingEnabled, true);
+  assert.notEqual(skinned, await rendererSignature('plasma', 'plasma.js'), 'plasma custom skin');
+});
+
+test('render.resolution controls the real buffer for every effect', async () => {
+  for (const [name, , , filename] of EFFECTS) {
+    const environment = createEnvironment();
+    await loadBundle(`../dist/effects/${filename}`, environment);
+    const canvas = environment.createCanvas('#demo', 40, 24);
+    environment.sandbox.Demoscene[name](canvas, {
+      config: { runtime: { autoStart: false }, render: { resolution: 0.5 } }
+    }).renderOnce(0);
+    const buffer = environment.canvases.find((candidate) => candidate !== canvas);
+    assert.deepEqual([buffer.width, buffer.height], [20, 12], name);
+  }
+});
+
+test('pauseWhenHidden controls viewport scheduling', async () => {
+  const environment = createEnvironment();
+  await loadBundle('../dist/effects/plasma.js', environment);
+  const canvas = environment.createCanvas('#demo', 48, 32);
+  environment.sandbox.Demoscene.plasma(canvas, { config: { runtime: { pauseWhenHidden: true } } });
+  environment.intersectionObservers[0].trigger(false);
+  environment.flush(0);
   assert.equal(environment.frameCount(), 0);
+  environment.intersectionObservers[0].trigger(true);
+  assert.equal(environment.frameCount(), 1);
 });
 
 test('maxFps skips renderer work while preserving the shared scheduler', async () => {
   const environment = createEnvironment();
   await loadBundle('../dist/effects/plasma.js', environment);
   const canvas = environment.createCanvas('#demo', 48, 32);
-  environment.sandbox.Demoscene.plasma(canvas, { runtime: { maxFps: 30 } });
+  environment.sandbox.Demoscene.plasma(canvas, { config: { runtime: { maxFps: 30 } } });
   environment.flush(0);
   assert.equal(canvas.context.drawCalls, 1);
   environment.flush(16);
@@ -559,10 +634,29 @@ test('60 FPS limiter tolerates a slightly early display callback', async () => {
   const environment = createEnvironment();
   await loadBundle('../dist/effects/plasma.js', environment);
   const canvas = environment.createCanvas('#demo', 48, 32);
-  environment.sandbox.Demoscene.plasma(canvas, { runtime: { maxFps: 60 } });
+  environment.sandbox.Demoscene.plasma(canvas, { config: { runtime: { maxFps: 60 } } });
   environment.flush(0);
   environment.flush(16.2);
   assert.equal(canvas.context.drawCalls, 2);
+});
+
+test('pixelRatio, resolution and renderOnce produce an exact static backing buffer', async () => {
+  const environment = createEnvironment();
+  await loadBundle('../dist/effects/mandelbrot.js', environment);
+  const canvas = environment.createCanvas('#demo', 100, 60);
+  const controller = environment.sandbox.Demoscene.mandelbrot(canvas, {
+    config: {
+      runtime: { autoStart: false, pixelRatio: 1.5 },
+      render: { resolution: 0.25, smoothing: true },
+      camera: { minZoom: 4000, maxZoom: 250000 }
+    }
+  });
+  controller.renderOnce(0);
+  const offscreen = environment.canvases.find((candidate) => candidate !== canvas);
+  assert.deepEqual([canvas.width, canvas.height], [150, 90]);
+  assert.deepEqual([offscreen.width, offscreen.height], [37, 22]);
+  assert.equal(canvas.context.imageSmoothingEnabled, true);
+  assert.equal(environment.frameCount(), 0);
 });
 
 test('controller stats report renderer backend and measured frames', async () => {
@@ -570,7 +664,7 @@ test('controller stats report renderer backend and measured frames', async () =>
   await loadBundle('../dist/effects/mandelbrot.js', environment);
   const controller = environment.sandbox.Demoscene.mandelbrot(
     environment.createCanvas('#demo', 48, 32),
-    { runtime: { autoStart: false } }
+    { config: { runtime: { autoStart: false } } }
   );
   const initial = controller.getStats();
   assert.equal(initial.backend, 'canvas2d');
@@ -590,9 +684,11 @@ test('Mandelbrot auto selects WebGL2 and survives context restoration', async ()
   await loadBundle('../dist/effects/mandelbrot.js', environment);
   const canvas = environment.createCanvas('#demo', 100, 60);
   const controller = environment.sandbox.Demoscene.mandelbrot(canvas, {
-    runtime: { autoStart: false },
-    render: { backend: 'auto', resolution: 0.6 },
-    algorithm: { maxIterations: 140 }
+    config: {
+      runtime: { autoStart: false },
+      render: { backend: 'auto', resolution: 0.6 },
+      algorithm: { maxIterations: 140 }
+    }
   });
   controller.renderOnce(0);
   assert.equal(controller.getStats().backend, 'webgl2');
@@ -628,7 +724,7 @@ test('Mandelbrot auto and explicit WebGL2 safely fall back to Canvas 2D', async 
     await loadBundle('../dist/effects/mandelbrot.js', environment);
     const controller = environment.sandbox.Demoscene.mandelbrot(
       environment.createCanvas('#demo', 48, 32),
-      { runtime: { autoStart: false }, render: { backend: 'webgl2' } }
+      { config: { runtime: { autoStart: false }, render: { backend: 'webgl2' } } }
     );
     controller.renderOnce(0);
     assert.equal(controller.getStats().backend, 'canvas2d');
@@ -639,9 +735,7 @@ async function firePixels(seed) {
   const environment = createEnvironment();
   await loadBundle('../dist/effects/fire.js', environment);
   const canvas = environment.createCanvas('#demo', 48, 32);
-  environment.sandbox.Demoscene.fire(canvas, {
-    simulation: { seed }
-  });
+  environment.sandbox.Demoscene.fire(canvas, { config: { simulation: { seed } } });
   environment.flush(0);
   environment.flush(17);
   environment.flush(34);
@@ -652,18 +746,18 @@ async function firePixels(seed) {
 test('seeded simulations are reproducible', async () => {
   assert.deepEqual(await firePixels(42), await firePixels(42));
   assert.notDeepEqual(await firePixels(42), await firePixels(43));
-  for (const [name, filename, makeSkin] of [
+  for (const [name, filename, makeConfig] of [
     ['starfield', 'starfield.js', (seed) => ({ particles: { seed, particleCount: 60 } })],
     ['sineScroller', 'sine-scroller.js', (seed) => ({ stars: { seed, count: 60 } })]
   ]) {
     assert.equal(
-      await rendererSignature(name, filename, makeSkin(42)),
-      await rendererSignature(name, filename, makeSkin(42)),
+      await rendererSignature(name, filename, { config: makeConfig(42) }),
+      await rendererSignature(name, filename, { config: makeConfig(42) }),
       `${name} same seed`
     );
     assert.notEqual(
-      await rendererSignature(name, filename, makeSkin(42)),
-      await rendererSignature(name, filename, makeSkin(43)),
+      await rendererSignature(name, filename, { config: makeConfig(42) }),
+      await rendererSignature(name, filename, { config: makeConfig(43) }),
       `${name} different seed`
     );
   }
@@ -694,11 +788,23 @@ test('hex palettes interpolate to the configured number of colours', () => {
   assert.equal(palette[2], packRgb(255, 255, 255) >>> 0);
 });
 
-test('build emits an API v2 manifest', async () => {
+test('build emits an API v3 manifest with effect names and skin names', async () => {
   const manifest = JSON.parse(await readFile(new URL('../dist/manifest.json', import.meta.url), 'utf8'));
-  assert.deepEqual(manifest, {
-    version: process.env.GITHUB_SHA || process.env.DEMOSCENE_VERSION || 'local',
-    apiVersion: 2,
-    bundle: 'demoscene.js'
-  });
+  assert.equal(manifest.apiVersion, 3);
+  assert.equal(manifest.bundle, 'demoscene.js');
+  assert.equal(manifest.version, process.env.GITHUB_SHA || process.env.DEMOSCENE_VERSION || 'local');
+  assert.deepEqual(manifest.effects.map((effect) => effect.name).sort(),
+    EFFECTS.map(([name]) => name).sort());
+  for (const effect of manifest.effects) {
+    assert.deepEqual(effect.skins, ['classic']);
+    assert.deepEqual(effect.surfaces.sort(), ['fullscreen', 'preview']);
+    assert.deepEqual(effect.devices.sort(), ['desktop', 'mobile']);
+  }
+});
+
+test('output filenames are unchanged from the v2 public contract', async () => {
+  const expected = EFFECTS.map(([, , , filename]) => filename).sort();
+  const { readdir } = await import('node:fs/promises');
+  const present = (await readdir(new URL('../dist/effects/', import.meta.url))).sort();
+  assert.deepEqual(present, expected);
 });

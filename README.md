@@ -128,6 +128,6 @@ npm run build:site
 ```
 
 Source modules live in `src/`. The build emits the complete bundle, ten
-standalone scripts and `dist/manifest.json` with `apiVersion: 2`. Generated
+standalone scripts and `dist/manifest.json` with `apiVersion: 3`. Generated
 bundles remain committed because the demos also work when opened through
 `file://`.
