@@ -76,7 +76,7 @@ export function coolingPerStep(H, cooling) {
 
 // Average the three cells in the row directly below (x-1, x, x+1) of (x, y),
 // reading from `cur`. Wraps horizontally so the flame has no hard side walls.
-function advect(cur, W, base, below, x) {
+function advect(cur, W, below, x) {
   const xl = x === 0 ? W - 1 : x - 1;
   const xr = x === W - 1 ? 0 : x + 1;
   return (cur[below + xl] + cur[below + x] + cur[below + xr]) / 3;
@@ -131,7 +131,7 @@ export function stepHeat(cur, next, W, H, params, rng) {
     const row = y * W;
     const below = (y + 1) * W;
     for (let x = 0; x < W; x++) {
-      next[row + x] = clamp01(advect(cur, W, row, below, x) * (1 - loss));
+      next[row + x] = clamp01(advect(cur, W, below, x) * (1 - loss));
     }
   }
 
@@ -144,10 +144,10 @@ export function stepHeat(cur, next, W, H, params, rng) {
     const row = y * W;
     const below = (y + 1) * W;
     for (let x = 0; x < xStart; x++) {
-      next[row + x] = clamp01(advect(cur, W, row, below, x) * (1 - loss));
+      next[row + x] = clamp01(advect(cur, W, below, x) * (1 - loss));
     }
     for (let x = xStart + widthCells; x < W; x++) {
-      next[row + x] = clamp01(advect(cur, W, row, below, x) * (1 - loss));
+      next[row + x] = clamp01(advect(cur, W, below, x) * (1 - loss));
     }
   }
 }
