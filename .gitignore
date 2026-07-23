@@ -1,3 +1,12 @@
 node_modules/
 _site/
 .DS_Store
+
+# Visual-QA harness generated artifacts.
+# Only committed baselines live under visual/baselines/; everything else is
+# regenerated on demand and must never be committed.
+visual/captures/
+visual/diffs/
+visual/sheets/
+visual/_*/
+

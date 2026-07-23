@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Undecorated, effect-only visual-QA test page.
+     No HUD, CRT overlay, hover states, system fonts, or gallery layout —
+     nothing that would leak into effect baselines. The canvas is resized and
+     mounted by the harness driver for each capture. -->
+<style>
+  html, body { margin: 0; padding: 0; background: #000; }
+  body { overflow: hidden; }
+  #c { display: block; image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="../dist/demoscene.js"></script>
+</body>
+</html>

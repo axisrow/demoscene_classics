@@ -131,3 +131,20 @@ Source modules live in `src/`. The build emits the complete bundle, ten
 standalone scripts and `dist/manifest.json` with `apiVersion: 3`. Generated
 bundles remain committed because the demos also work when opened through
 `file://`.
+
+## Visual QA
+
+A deterministic browser harness captures the ten effects across four responsive
+profiles × three timestamps (120 images) and compares them against committed
+baselines. It uses a pinned Python Playwright + Chromium pair.
+
+```sh
+pip install playwright==1.59.0 && python -m playwright install chromium
+npm run test:visual          # compare captures vs committed baselines
+npm run visual:update        # replace baselines (review the contact sheet first)
+npm run visual:contact-sheet # build review contact sheets
+```
+
+See [`visual/README.md`](visual/README.md) for the pinned runtime, determinism
+invariants, the capture matrix, and the bounded tolerance policy.
+

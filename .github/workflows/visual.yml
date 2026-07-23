@@ -1,0 +1,66 @@
+name: visual-qa
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  visual:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # Pin the Python Playwright runtime used by the harness. Playwright 1.59.0
+      # resolves chromium build 1217 (see visual/pin.mjs). A mismatched build
+      # fails the harness loudly rather than emitting drifting baselines.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install playwright==1.59.0
+      - run: python -m playwright install --with-deps chromium
+
+      # Build the production bundle the harness loads, then run the unit suite
+      # (matrix, fixed-step, pixel comparator, WebGL smoke) and the full visual
+      # comparison against the committed baselines.
+      - run: npm run build
+      - run: npm run test:visual:unit
+      - run: npm run test:visual
+
+      # On failure, upload the diff images and review contact sheets so a human
+      # can triage without re-running. Raw captures and review sheets are kept
+      # as separate artifacts.
+      - name: Upload visual diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-diffs
+          path: visual/diffs/
+          if-no-files-found: ignore
+
+      - name: Upload review contact sheets
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-contact-sheets
+          path: visual/sheets/
+          if-no-files-found: ignore
+
+      - name: Upload raw captures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-captures
+          path: visual/captures/
+          if-no-files-found: ignore
