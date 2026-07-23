@@ -809,6 +809,67 @@
     }
   };
 
+  // src/effects/fire/sim.js
+  function clamp01(value) {
+    return value < 0 ? 0 : value > 1 ? 1 : value;
+  }
+  function sourceGeometry(W, H, { sourceWidthFrac, sourceDepthFrac }) {
+    const depthRows = Math.max(1, Math.round(H * sourceDepthFrac));
+    const widthCells = Math.max(1, Math.round(W * sourceWidthFrac));
+    const xStart = W - widthCells >> 1;
+    return { depthRows, widthCells, xStart, firstSourceRow: H - depthRows };
+  }
+  function coolingPerStep(H, cooling) {
+    return Math.min(6 * cooling / H, 0.95);
+  }
+  function advect(cur, W, base, below, x) {
+    const xl = x === 0 ? W - 1 : x - 1;
+    const xr = x === W - 1 ? 0 : x + 1;
+    return (cur[below + xl] + cur[below + x] + cur[below + xr]) / 3;
+  }
+  function stepHeat(cur, next, W, H, params, rng) {
+    const { depthRows, widthCells, xStart, firstSourceRow } = sourceGeometry(W, H, params);
+    const loss = coolingPerStep(H, params.cooling);
+    const intensity = params.sourceIntensity;
+    const lastRow = H - 1;
+    const denom = widthCells > 1 ? widthCells - 1 : 1;
+    next.fill(0);
+    for (let y = firstSourceRow; y <= lastRow; y++) {
+      const row = y * W;
+      for (let i = 0; i < widthCells; i++) {
+        const x = xStart + i;
+        const xFrac = i / denom;
+        const envelope = 0.5 * (1 + Math.sin(Math.PI * xFrac));
+        const flicker = 0.75 + 0.25 * rng();
+        next[row + x] = clamp01(intensity * envelope * flicker);
+      }
+    }
+    for (let y = 0; y < firstSourceRow; y++) {
+      const row = y * W;
+      const below = (y + 1) * W;
+      for (let x = 0; x < W; x++) {
+        next[row + x] = clamp01(advect(cur, W, row, below, x) * (1 - loss));
+      }
+    }
+    for (let y = firstSourceRow; y <= lastRow; y++) {
+      if (y === lastRow) continue;
+      const row = y * W;
+      const below = (y + 1) * W;
+      for (let x = 0; x < xStart; x++) {
+        next[row + x] = clamp01(advect(cur, W, row, below, x) * (1 - loss));
+      }
+      for (let x = xStart + widthCells; x < W; x++) {
+        next[row + x] = clamp01(advect(cur, W, row, below, x) * (1 - loss));
+      }
+    }
+  }
+  function paint(palette, heat, pixels) {
+    const max = palette.length - 1;
+    for (let i = 0; i < heat.length; i++) {
+      pixels[i] = palette[Math.min(max, Math.max(0, Math.round(heat[i] * max)))];
+    }
+  }
+
   // src/effects/fire/renderer.js
   function createFireRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
@@ -817,49 +878,36 @@
       new Uint32Array(config.appearance.colorCount),
       config.appearance.palette
     );
+    let cur = new Float32Array(0);
+    let next = new Float32Array(0);
     let random = createSeededRandom(config.simulation.seed);
-    let heat = new Uint8Array(0);
     let accumulator = 0;
     let width = 1;
     let height = 1;
-    function spread() {
-      const lastRow = buffer.height - 1;
-      for (let x = 0; x < buffer.width; x++) {
-        heat[lastRow * buffer.width + x] = random() < config.simulation.sourceDensity ? config.simulation.sourceIntensity : Math.floor(random() * config.simulation.sourceVariance);
-      }
-      for (let y = 1; y < buffer.height; y++) {
-        const row = y * buffer.width;
-        const previousRow = (y - 1) * buffer.width;
-        for (let x = 0; x < buffer.width; x++) {
-          const cooling = Math.floor(random() * (config.simulation.cooling + 1));
-          const drift = Math.floor((random() * 2 - 1) * (config.simulation.horizontalDrift + 1));
-          const targetX = (x + drift + buffer.width) % buffer.width;
-          heat[previousRow + targetX] = Math.max(0, heat[row + x] - cooling);
-        }
-      }
-    }
+    const stepSeconds = 1 / config.simulation.stepHz;
     return {
       resize(nextWidth, nextHeight) {
         width = nextWidth;
         height = nextHeight;
         resizePixelBuffer(buffer, width * config.render.resolution, height * config.render.resolution);
+        const cells = buffer.width * buffer.height;
+        cur = new Float32Array(cells);
+        next = new Float32Array(cells);
         random = createSeededRandom(config.simulation.seed);
-        heat = new Uint8Array(buffer.width * buffer.height);
         accumulator = 0;
       },
       render({ delta }) {
         accumulator += delta * config.motion.speed;
-        const stepSeconds = 1 / config.simulation.stepHz;
         let steps = 0;
         while (accumulator >= stepSeconds && steps < config.simulation.maxCatchUpSteps) {
-          spread();
+          stepHeat(cur, next, buffer.width, buffer.height, config.simulation, random);
+          const tmp = cur;
+          cur = next;
+          next = tmp;
           accumulator -= stepSeconds;
           steps++;
         }
-        for (let i = 0; i < heat.length; i++) {
-          const paletteIndex = Math.round(heat[i] / 255 * (palette.length - 1));
-          buffer.pixels[i] = palette[paletteIndex];
-        }
+        paint(palette, cur, buffer.pixels);
         presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
       }
     };
@@ -870,35 +918,53 @@
     render: { resolution: 0.25, smoothing: false },
     motion: { speed: 1 },
     appearance: {
-      palette: ["#000000", "#ff0000", "#ffff00", "#ffffff"],
+      // Defensive 2-colour placeholder so a skinless resolve still validates. The
+      // real classic ramp (black → burgundy → orange → yellow → near-white) lives
+      // in skins.js and overrides this through the resolver merge.
+      palette: ["#000000", "#ff7a00"],
       colorCount: 256,
       backgroundColor: "#000000"
     },
     simulation: {
       seed: 1993,
       stepHz: 60,
-      sourceDensity: 0.65,
-      sourceIntensity: 255,
-      sourceVariance: 96,
-      cooling: 2,
-      horizontalDrift: 1,
+      sourceWidthFrac: 0.8,
+      sourceDepthFrac: 0.06,
+      sourceIntensity: 1,
+      cooling: 0.5,
+      drift: 0,
       maxCatchUpSteps: 3
     }
   });
   function validateFire(config) {
-    assertNumber(config.simulation.seed, "fire.simulation.seed", { min: 0, max: 4294967295, integer: true });
-    assertNumber(config.simulation.stepHz, "fire.simulation.stepHz", { min: 1, max: 240 });
-    assertNumber(config.simulation.sourceDensity, "fire.simulation.sourceDensity", { min: 0, max: 1 });
-    assertNumber(config.simulation.sourceIntensity, "fire.simulation.sourceIntensity", { min: 0, max: 255, integer: true });
-    assertNumber(config.simulation.sourceVariance, "fire.simulation.sourceVariance", { min: 0, max: 255, integer: true });
-    assertNumber(config.simulation.cooling, "fire.simulation.cooling", { min: 0, max: 32, integer: true });
-    assertNumber(config.simulation.horizontalDrift, "fire.simulation.horizontalDrift", { min: 0, max: 16, integer: true });
-    assertNumber(config.simulation.maxCatchUpSteps, "fire.simulation.maxCatchUpSteps", { min: 1, max: 20, integer: true });
+    const sim = config.simulation;
+    assertNumber(sim.seed, "fire.simulation.seed", { min: 0, max: 4294967295, integer: true });
+    assertNumber(sim.stepHz, "fire.simulation.stepHz", { min: 1, max: 240 });
+    assertNumber(sim.sourceWidthFrac, "fire.simulation.sourceWidthFrac", { min: 0.01, max: 1 });
+    assertNumber(sim.sourceDepthFrac, "fire.simulation.sourceDepthFrac", { min: 0.01, max: 0.5 });
+    assertNumber(sim.sourceIntensity, "fire.simulation.sourceIntensity", { min: 0, max: 1 });
+    assertNumber(sim.cooling, "fire.simulation.cooling", { min: 0, max: 1 });
+    assertNumber(sim.drift, "fire.simulation.drift", { min: 0, max: 1 });
+    assertNumber(sim.maxCatchUpSteps, "fire.simulation.maxCatchUpSteps", { min: 1, max: 20, integer: true });
   }
 
   // src/effects/fire/skins.js
   var FIRE_SKINS = Object.freeze({
-    classic: Object.freeze({})
+    classic: Object.freeze({
+      appearance: Object.freeze({
+        palette: Object.freeze([
+          "#000000",
+          "#2b0000",
+          "#8b0a0a",
+          "#d83a0a",
+          "#ff7a00",
+          "#ffb400",
+          "#ffe55c",
+          "#fffff0"
+        ]),
+        colorCount: 256
+      })
+    })
   });
 
   // src/effects/fire/profiles.js
@@ -906,12 +972,15 @@
   var RUNTIME_FULLSCREEN_MOBILE2 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP2 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE2 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_RENDER2 = { render: { resolution: 0.2 } };
+  var RENDER_FULLSCREEN_DESKTOP = { render: { resolution: 0.25 } };
+  var RENDER_FULLSCREEN_MOBILE = { render: { resolution: 0.2 } };
+  var RENDER_PREVIEW_DESKTOP = { render: { resolution: 0.2 } };
+  var RENDER_PREVIEW_MOBILE = { render: { resolution: 0.15 } };
   var FIRE_PROFILES = buildProfiles({
-    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP2 },
-    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE2 },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP2, ...PREVIEW_RENDER2 },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE2, ...PREVIEW_RENDER2 }
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP2, ...RENDER_FULLSCREEN_DESKTOP },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE2, ...RENDER_FULLSCREEN_MOBILE },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP2, ...RENDER_PREVIEW_DESKTOP },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE2, ...RENDER_PREVIEW_MOBILE }
   });
 
   // src/effects/fire/index.js
@@ -1403,12 +1472,12 @@
   var RUNTIME_FULLSCREEN_MOBILE5 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP5 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE5 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_RENDER3 = { render: { resolution: 0.2 } };
+  var PREVIEW_RENDER2 = { render: { resolution: 0.2 } };
   var TUNNEL_PROFILES = buildProfiles({
     "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP5 },
     "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE5 },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP5, ...PREVIEW_RENDER3 },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE5, ...PREVIEW_RENDER3 }
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP5, ...PREVIEW_RENDER2 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE5, ...PREVIEW_RENDER2 }
   });
 
   // src/effects/tunnel/index.js
@@ -2127,7 +2196,7 @@ void main() {
   var RUNTIME_FULLSCREEN_MOBILE6 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP6 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE6 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_RENDER4 = { render: { resolution: 0.19, smoothing: true } };
+  var PREVIEW_RENDER3 = { render: { resolution: 0.19, smoothing: true } };
   var CAMERA_LANDSCAPE = {
     camera: {
       centerX: -0.7436438870371587,
@@ -2147,8 +2216,8 @@ void main() {
   var MANDELBROT_PROFILES = buildProfiles({
     "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP6, ...CAMERA_LANDSCAPE },
     "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE6, ...CAMERA_PORTRAIT },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP6, ...PREVIEW_RENDER4, ...CAMERA_LANDSCAPE },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE6, ...PREVIEW_RENDER4, ...CAMERA_PORTRAIT }
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP6, ...PREVIEW_RENDER3, ...CAMERA_LANDSCAPE },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE6, ...PREVIEW_RENDER3, ...CAMERA_PORTRAIT }
   });
 
   // src/effects/mandelbrot/index.js
@@ -2464,12 +2533,12 @@ void main() {
   var RUNTIME_FULLSCREEN_MOBILE8 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP8 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE8 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_RENDER5 = { render: { resolution: 0.25 } };
+  var PREVIEW_RENDER4 = { render: { resolution: 0.25 } };
   var ROTOZOOM_PROFILES = buildProfiles({
     "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP8 },
     "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE8 },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP8, ...PREVIEW_RENDER5 },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE8, ...PREVIEW_RENDER5 }
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP8, ...PREVIEW_RENDER4 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE8, ...PREVIEW_RENDER4 }
   });
 
   // src/effects/rotozoom/index.js
@@ -2637,12 +2706,12 @@ void main() {
   var RUNTIME_FULLSCREEN_MOBILE9 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP9 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE9 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_RENDER6 = { render: { resolution: 0.7 } };
+  var PREVIEW_RENDER5 = { render: { resolution: 0.7 } };
   var FEEDBACK_PROFILES = buildProfiles({
     "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP9 },
     "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE9 },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP9, ...PREVIEW_RENDER6 },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE9, ...PREVIEW_RENDER6 }
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP9, ...PREVIEW_RENDER5 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE9, ...PREVIEW_RENDER5 }
   });
 
   // src/effects/feedback/index.js
@@ -2763,12 +2832,12 @@ void main() {
   var RUNTIME_FULLSCREEN_MOBILE10 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP10 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE10 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_RENDER7 = { render: { resolution: 0.3 } };
+  var PREVIEW_RENDER6 = { render: { resolution: 0.3 } };
   var COPPER_BARS_PROFILES = buildProfiles({
     "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP10 },
     "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE10 },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP10, ...PREVIEW_RENDER7 },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE10, ...PREVIEW_RENDER7 }
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP10, ...PREVIEW_RENDER6 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE10, ...PREVIEW_RENDER6 }
   });
 
   // src/effects/copper-bars/index.js
