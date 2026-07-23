@@ -606,8 +606,11 @@
       new Uint32Array(config.appearance.colorCount),
       config.appearance.palette
     );
-    const { field, motion, render } = config;
+    const { field, motion, render, appearance } = config;
     const totalAmplitude = field.amplitudes.reduce((sum, item) => sum + Math.abs(item), 0) || 1;
+    const contrast = Number.isFinite(appearance.contrast) && appearance.contrast > 0 ? Math.min(1, appearance.contrast) : 1;
+    const twoPi = Math.PI * 2;
+    const motionPhaseScale = 1.2;
     let width = 1;
     let height = 1;
     return {
@@ -618,26 +621,49 @@
       },
       render({ time }) {
         const scaledTime = time * motion.speed;
-        const phase = scaledTime * 1.2;
+        const phase = scaledTime * motionPhaseScale;
         const paletteOffset = Math.floor(scaledTime * motion.paletteCycleSpeed * palette.length);
-        const radialX = buffer.width * field.radialCenterX;
-        const radialY = buffer.height * field.radialCenterY;
+        const paletteLen = palette.length;
+        const w = buffer.width;
+        const h = buffer.height;
+        const aspect = w / h;
+        const aspectU = field.aspectCorrection ? aspect : 1;
+        const radialCx = field.radialCenterX;
+        const radialCy = field.radialCenterY;
+        const f0 = field.frequencies[0] * twoPi;
+        const f1 = field.frequencies[1] * twoPi;
+        const f2 = field.frequencies[2] * twoPi;
+        const f3 = field.frequencies[3] * twoPi;
+        const a0 = field.amplitudes[0];
+        const a1 = field.amplitudes[1];
+        const a2 = field.amplitudes[2];
+        const a3 = field.amplitudes[3];
+        const pr0 = phase * field.phaseRates[0];
+        const pr1 = phase * field.phaseRates[1];
+        const pr2 = phase * field.phaseRates[2];
+        const pr3 = phase * field.phaseRates[3];
+        const uColumn = new Float64Array(w);
+        for (let x = 0; x < w; x++) {
+          uColumn[x] = ((x + 0.5) / w - 0.5) * aspectU;
+        }
+        const normScale = 1 / (totalAmplitude * 2);
         let index = 0;
-        for (let y = 0; y < buffer.height; y++) {
-          for (let x = 0; x < buffer.width; x++) {
-            let value = Math.sin(x * field.frequencies[0] + phase * field.phaseRates[0]) * field.amplitudes[0];
-            value += Math.sin(y * field.frequencies[1] + phase * field.phaseRates[1]) * field.amplitudes[1];
-            value += Math.sin((x + y) * field.frequencies[2] + phase * field.phaseRates[2]) * field.amplitudes[2];
-            const cx = (x - radialX) * field.frequencies[0];
-            const cy = (y - radialY) * field.frequencies[1];
-            value += Math.sin(
-              Math.sqrt(cx * cx + cy * cy + 1) * field.frequencies[3] + phase * field.phaseRates[3]
-            ) * field.amplitudes[3];
-            const fieldIndex = Math.min(
-              palette.length - 1,
-              Math.max(0, Math.floor((value + totalAmplitude) / (totalAmplitude * 2) * palette.length))
-            );
-            buffer.pixels[index++] = palette[(fieldIndex + paletteOffset) % palette.length];
+        for (let y = 0; y < h; y++) {
+          const v = (y + 0.5) / h - 0.5;
+          for (let x = 0; x < w; x++) {
+            const u = uColumn[x];
+            let value = Math.sin(f0 * u + pr0) * a0;
+            value += Math.sin(f1 * v + pr1) * a1;
+            value += Math.sin(f2 * (u + v) + pr2) * a2;
+            const dx = u + (0.5 - radialCx) * aspectU;
+            const dy = v + (0.5 - radialCy);
+            value += Math.sin(f3 * Math.sqrt(dx * dx + dy * dy) + pr3) * a3;
+            let normalized = (value + totalAmplitude) * normScale;
+            if (contrast !== 1 && normalized > 0) {
+              normalized = Math.pow(normalized, contrast);
+            }
+            const fieldIndex = normalized <= 0 ? 0 : normalized >= 1 ? paletteLen - 1 : normalized * paletteLen | 0;
+            buffer.pixels[index++] = palette[(fieldIndex + paletteOffset) % paletteLen];
           }
         }
         presentPixelBuffer(context, buffer, width, height, render.smoothing);
@@ -650,36 +676,29 @@
     render: { resolution: 0.25, smoothing: false },
     motion: { speed: 1, paletteCycleSpeed: 0.19 },
     appearance: {
-      palette: [
-        "#80ed12",
-        "#bfbf01",
-        "#ed8012",
-        "#ff4040",
-        "#ed127f",
-        "#bf01bf",
-        "#8012ed",
-        "#4040ff",
-        "#127fed",
-        "#01bfbf",
-        "#12ed80",
-        "#40ff40",
-        "#7fed12"
-      ],
-      colorCount: 256,
-      backgroundColor: "#000000"
+      // `contrast` is an appearance-only gamma applied to the normalised field
+      // value before palette lookup (see renderer.js). The classic skin overrides
+      // it; the default here is a neutral 1.0 (no reshaping).
+      contrast: 1
     },
     field: {
-      frequencies: [0.04, 0.04, 0.04, 1],
+      // Cycles-per-viewport-height for the four components (axis-x, axis-y,
+      // diagonal/interference, radial). Chosen so the field shows several crests
+      // in every direction at once without collapsing into a near-flat wash.
+      frequencies: [3, 3, 2, 2.5],
+      amplitudes: [1, 1, 1, 1],
+      phaseRates: [1, 0.5, 0.5, 1],
       radialCenterX: 0.5,
       radialCenterY: 0.5,
-      amplitudes: [1, 1, 1, 1],
-      phaseRates: [1, 0.5, 0.5, 1]
+      aspectCorrection: true
     }
   });
   function validatePlasma(config) {
     assertNumber(config.motion.paletteCycleSpeed, "plasma.motion.paletteCycleSpeed", { min: 0 });
+    assertNumber(config.appearance.contrast, "plasma.appearance.contrast", { min: Number.MIN_VALUE, max: 4 });
+    assertBoolean(config.field.aspectCorrection, "plasma.field.aspectCorrection");
     for (const key of ["radialCenterX", "radialCenterY"]) {
-      assertNumber(config.field[key], `plasma.field.${key}`);
+      assertNumber(config.field[key], `plasma.field.${key}`, { min: 0, max: 1 });
     }
     for (const key of ["frequencies", "amplitudes", "phaseRates"]) {
       if (!Array.isArray(config.field[key]) || config.field[key].length !== 4) {
@@ -688,14 +707,46 @@
       config.field[key].forEach((value, index) => assertNumber(
         value,
         `plasma.field.${key}[${index}]`,
-        key === "frequencies" ? { min: Number.MIN_VALUE } : void 0
+        key === "frequencies" || key === "amplitudes" ? { min: Number.MIN_VALUE } : void 0
       ));
     }
   }
 
   // src/effects/plasma/skins.js
+  var CLASSIC_PALETTE = Object.freeze([
+    "#05030f",
+    // near-black indigo shadow
+    "#1b0d3a",
+    // deep violet
+    "#3a1078",
+    // indigo
+    "#6a1b9a",
+    // purple
+    "#a8176b",
+    // magenta-rose
+    "#d6336c",
+    // rose
+    "#f25c54",
+    // warm coral
+    "#ffa94d",
+    // amber
+    "#ffe066",
+    // pale gold highlight
+    "#ffffff"
+    // crest white accent (small share only)
+  ]);
   var PLASMA_SKINS = Object.freeze({
-    classic: Object.freeze({})
+    classic: Object.freeze({
+      appearance: {
+        palette: CLASSIC_PALETTE,
+        colorCount: 256,
+        backgroundColor: "#05030f",
+        // Soft gamma applied to the normalized field value before palette lookup.
+        // <1 opens up the shadow band (more dark structure visible); the field
+        // value never clips to flat because the curve is bounded on (0,1].
+        contrast: 0.85
+      }
+    })
   });
 
   // src/effects/profiles.js
@@ -750,12 +801,15 @@
   var RUNTIME_FULLSCREEN_MOBILE = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_RENDER = { render: { resolution: 0.2 } };
+  var RENDER_FULLSCREEN = { render: { resolution: 0.25 } };
+  var RENDER_FULLSCREEN_MOBILE = { render: { resolution: 0.2 } };
+  var RENDER_PREVIEW = { render: { resolution: 0.2 } };
+  var RENDER_PREVIEW_MOBILE = { render: { resolution: 0.16 } };
   var PLASMA_PROFILES = buildProfiles({
-    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP },
-    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP, ...PREVIEW_RENDER },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE, ...PREVIEW_RENDER }
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP, ...RENDER_FULLSCREEN },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE, ...RENDER_FULLSCREEN_MOBILE },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP, ...RENDER_PREVIEW },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE, ...RENDER_PREVIEW_MOBILE }
   });
 
   // src/effects/plasma/index.js

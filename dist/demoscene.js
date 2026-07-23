@@ -642,8 +642,11 @@
       new Uint32Array(config.appearance.colorCount),
       config.appearance.palette
     );
-    const { field, motion, render } = config;
+    const { field, motion, render, appearance } = config;
     const totalAmplitude = field.amplitudes.reduce((sum, item) => sum + Math.abs(item), 0) || 1;
+    const contrast = Number.isFinite(appearance.contrast) && appearance.contrast > 0 ? Math.min(1, appearance.contrast) : 1;
+    const twoPi = Math.PI * 2;
+    const motionPhaseScale = 1.2;
     let width = 1;
     let height = 1;
     return {
@@ -654,26 +657,49 @@
       },
       render({ time }) {
         const scaledTime = time * motion.speed;
-        const phase = scaledTime * 1.2;
+        const phase = scaledTime * motionPhaseScale;
         const paletteOffset = Math.floor(scaledTime * motion.paletteCycleSpeed * palette.length);
-        const radialX = buffer.width * field.radialCenterX;
-        const radialY = buffer.height * field.radialCenterY;
+        const paletteLen = palette.length;
+        const w = buffer.width;
+        const h = buffer.height;
+        const aspect = w / h;
+        const aspectU = field.aspectCorrection ? aspect : 1;
+        const radialCx = field.radialCenterX;
+        const radialCy = field.radialCenterY;
+        const f0 = field.frequencies[0] * twoPi;
+        const f1 = field.frequencies[1] * twoPi;
+        const f2 = field.frequencies[2] * twoPi;
+        const f3 = field.frequencies[3] * twoPi;
+        const a0 = field.amplitudes[0];
+        const a1 = field.amplitudes[1];
+        const a2 = field.amplitudes[2];
+        const a3 = field.amplitudes[3];
+        const pr0 = phase * field.phaseRates[0];
+        const pr1 = phase * field.phaseRates[1];
+        const pr2 = phase * field.phaseRates[2];
+        const pr3 = phase * field.phaseRates[3];
+        const uColumn = new Float64Array(w);
+        for (let x = 0; x < w; x++) {
+          uColumn[x] = ((x + 0.5) / w - 0.5) * aspectU;
+        }
+        const normScale = 1 / (totalAmplitude * 2);
         let index = 0;
-        for (let y = 0; y < buffer.height; y++) {
-          for (let x = 0; x < buffer.width; x++) {
-            let value = Math.sin(x * field.frequencies[0] + phase * field.phaseRates[0]) * field.amplitudes[0];
-            value += Math.sin(y * field.frequencies[1] + phase * field.phaseRates[1]) * field.amplitudes[1];
-            value += Math.sin((x + y) * field.frequencies[2] + phase * field.phaseRates[2]) * field.amplitudes[2];
-            const cx = (x - radialX) * field.frequencies[0];
-            const cy = (y - radialY) * field.frequencies[1];
-            value += Math.sin(
-              Math.sqrt(cx * cx + cy * cy + 1) * field.frequencies[3] + phase * field.phaseRates[3]
-            ) * field.amplitudes[3];
-            const fieldIndex = Math.min(
-              palette.length - 1,
-              Math.max(0, Math.floor((value + totalAmplitude) / (totalAmplitude * 2) * palette.length))
-            );
-            buffer.pixels[index++] = palette[(fieldIndex + paletteOffset) % palette.length];
+        for (let y = 0; y < h; y++) {
+          const v = (y + 0.5) / h - 0.5;
+          for (let x = 0; x < w; x++) {
+            const u = uColumn[x];
+            let value = Math.sin(f0 * u + pr0) * a0;
+            value += Math.sin(f1 * v + pr1) * a1;
+            value += Math.sin(f2 * (u + v) + pr2) * a2;
+            const dx = u + (0.5 - radialCx) * aspectU;
+            const dy = v + (0.5 - radialCy);
+            value += Math.sin(f3 * Math.sqrt(dx * dx + dy * dy) + pr3) * a3;
+            let normalized = (value + totalAmplitude) * normScale;
+            if (contrast !== 1 && normalized > 0) {
+              normalized = Math.pow(normalized, contrast);
+            }
+            const fieldIndex = normalized <= 0 ? 0 : normalized >= 1 ? paletteLen - 1 : normalized * paletteLen | 0;
+            buffer.pixels[index++] = palette[(fieldIndex + paletteOffset) % paletteLen];
           }
         }
         presentPixelBuffer(context, buffer, width, height, render.smoothing);
@@ -686,36 +712,29 @@
     render: { resolution: 0.25, smoothing: false },
     motion: { speed: 1, paletteCycleSpeed: 0.19 },
     appearance: {
-      palette: [
-        "#80ed12",
-        "#bfbf01",
-        "#ed8012",
-        "#ff4040",
-        "#ed127f",
-        "#bf01bf",
-        "#8012ed",
-        "#4040ff",
-        "#127fed",
-        "#01bfbf",
-        "#12ed80",
-        "#40ff40",
-        "#7fed12"
-      ],
-      colorCount: 256,
-      backgroundColor: "#000000"
+      // `contrast` is an appearance-only gamma applied to the normalised field
+      // value before palette lookup (see renderer.js). The classic skin overrides
+      // it; the default here is a neutral 1.0 (no reshaping).
+      contrast: 1
     },
     field: {
-      frequencies: [0.04, 0.04, 0.04, 1],
+      // Cycles-per-viewport-height for the four components (axis-x, axis-y,
+      // diagonal/interference, radial). Chosen so the field shows several crests
+      // in every direction at once without collapsing into a near-flat wash.
+      frequencies: [3, 3, 2, 2.5],
+      amplitudes: [1, 1, 1, 1],
+      phaseRates: [1, 0.5, 0.5, 1],
       radialCenterX: 0.5,
       radialCenterY: 0.5,
-      amplitudes: [1, 1, 1, 1],
-      phaseRates: [1, 0.5, 0.5, 1]
+      aspectCorrection: true
     }
   });
   function validatePlasma(config) {
     assertNumber(config.motion.paletteCycleSpeed, "plasma.motion.paletteCycleSpeed", { min: 0 });
+    assertNumber(config.appearance.contrast, "plasma.appearance.contrast", { min: Number.MIN_VALUE, max: 4 });
+    assertBoolean(config.field.aspectCorrection, "plasma.field.aspectCorrection");
     for (const key of ["radialCenterX", "radialCenterY"]) {
-      assertNumber(config.field[key], `plasma.field.${key}`);
+      assertNumber(config.field[key], `plasma.field.${key}`, { min: 0, max: 1 });
     }
     for (const key of ["frequencies", "amplitudes", "phaseRates"]) {
       if (!Array.isArray(config.field[key]) || config.field[key].length !== 4) {
@@ -724,14 +743,46 @@
       config.field[key].forEach((value, index) => assertNumber(
         value,
         `plasma.field.${key}[${index}]`,
-        key === "frequencies" ? { min: Number.MIN_VALUE } : void 0
+        key === "frequencies" || key === "amplitudes" ? { min: Number.MIN_VALUE } : void 0
       ));
     }
   }
 
   // src/effects/plasma/skins.js
+  var CLASSIC_PALETTE = Object.freeze([
+    "#05030f",
+    // near-black indigo shadow
+    "#1b0d3a",
+    // deep violet
+    "#3a1078",
+    // indigo
+    "#6a1b9a",
+    // purple
+    "#a8176b",
+    // magenta-rose
+    "#d6336c",
+    // rose
+    "#f25c54",
+    // warm coral
+    "#ffa94d",
+    // amber
+    "#ffe066",
+    // pale gold highlight
+    "#ffffff"
+    // crest white accent (small share only)
+  ]);
   var PLASMA_SKINS = Object.freeze({
-    classic: Object.freeze({})
+    classic: Object.freeze({
+      appearance: {
+        palette: CLASSIC_PALETTE,
+        colorCount: 256,
+        backgroundColor: "#05030f",
+        // Soft gamma applied to the normalized field value before palette lookup.
+        // <1 opens up the shadow band (more dark structure visible); the field
+        // value never clips to flat because the curve is bounded on (0,1].
+        contrast: 0.85
+      }
+    })
   });
 
   // src/effects/profiles.js
@@ -786,12 +837,15 @@
   var RUNTIME_FULLSCREEN_MOBILE = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_RENDER = { render: { resolution: 0.2 } };
+  var RENDER_FULLSCREEN = { render: { resolution: 0.25 } };
+  var RENDER_FULLSCREEN_MOBILE = { render: { resolution: 0.2 } };
+  var RENDER_PREVIEW = { render: { resolution: 0.2 } };
+  var RENDER_PREVIEW_MOBILE = { render: { resolution: 0.16 } };
   var PLASMA_PROFILES = buildProfiles({
-    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP },
-    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP, ...PREVIEW_RENDER },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE, ...PREVIEW_RENDER }
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP, ...RENDER_FULLSCREEN },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE, ...RENDER_FULLSCREEN_MOBILE },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP, ...RENDER_PREVIEW },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE, ...RENDER_PREVIEW_MOBILE }
   });
 
   // src/effects/plasma/index.js
@@ -809,81 +863,6 @@
     }
   };
 
-  // src/effects/fire/sim.js
-  function clamp01(value) {
-    return value < 0 ? 0 : value > 1 ? 1 : value;
-  }
-  function sourceGeometry(W, H, { sourceWidthFrac, sourceDepthFrac }) {
-    const depthRows = Math.max(1, Math.round(H * sourceDepthFrac));
-    const widthCells = Math.max(1, Math.round(W * sourceWidthFrac));
-    const xStart = W - widthCells >> 1;
-    return { depthRows, widthCells, xStart, firstSourceRow: H - depthRows };
-  }
-  function riseStride(H, riseFrac, stepHz) {
-    return riseFrac / stepHz * H;
-  }
-  function coolingPerStep(H, cooling) {
-    return Math.min(6 * cooling / H, 0.95);
-  }
-  function rowAverage(cur, W, rowOffset, x) {
-    const xl = x === 0 ? W - 1 : x - 1;
-    const xr = x === W - 1 ? 0 : x + 1;
-    return (cur[rowOffset + xl] + cur[rowOffset + x] + cur[rowOffset + xr]) / 3;
-  }
-  function advect(cur, W, x, y, stride, lastRow) {
-    const below = y + stride;
-    let y0 = Math.floor(below);
-    let y1 = y0 + 1;
-    if (y0 > lastRow) y0 = lastRow;
-    if (y1 > lastRow) y1 = lastRow;
-    const frac = below - Math.floor(below);
-    const lo = rowAverage(cur, W, y0 * W, x);
-    if (frac === 0 || y0 === y1) return lo;
-    const hi = rowAverage(cur, W, y1 * W, x);
-    return lo + (hi - lo) * frac;
-  }
-  function stepHeat(cur, next, W, H, params, rng) {
-    const { depthRows, widthCells, xStart, firstSourceRow } = sourceGeometry(W, H, params);
-    const loss = coolingPerStep(H, params.cooling);
-    const stride = riseStride(H, params.riseFrac, params.stepHz);
-    const coolFactor = Math.pow(1 - loss, stride);
-    const intensity = params.sourceIntensity;
-    const lastRow = H - 1;
-    const denom = widthCells > 1 ? widthCells - 1 : 1;
-    next.fill(0);
-    for (let y = firstSourceRow; y <= lastRow; y++) {
-      const row = y * W;
-      for (let i = 0; i < widthCells; i++) {
-        const x = xStart + i;
-        const xFrac = i / denom;
-        const envelope = 0.5 * (1 + Math.sin(Math.PI * xFrac));
-        const flicker = 0.75 + 0.25 * rng();
-        next[row + x] = clamp01(intensity * envelope * flicker);
-      }
-    }
-    for (let y = 0; y < firstSourceRow; y++) {
-      const row = y * W;
-      for (let x = 0; x < W; x++) {
-        next[row + x] = clamp01(advect(cur, W, x, y, stride, lastRow) * coolFactor);
-      }
-    }
-    for (let y = firstSourceRow; y <= lastRow; y++) {
-      const row = y * W;
-      for (let x = 0; x < xStart; x++) {
-        next[row + x] = clamp01(advect(cur, W, x, y, stride, lastRow) * coolFactor);
-      }
-      for (let x = xStart + widthCells; x < W; x++) {
-        next[row + x] = clamp01(advect(cur, W, x, y, stride, lastRow) * coolFactor);
-      }
-    }
-  }
-  function paint(palette, heat, pixels) {
-    const max = palette.length - 1;
-    for (let i = 0; i < heat.length; i++) {
-      pixels[i] = palette[Math.min(max, Math.max(0, Math.round(heat[i] * max)))];
-    }
-  }
-
   // src/effects/fire/renderer.js
   function createFireRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
@@ -892,36 +871,49 @@
       new Uint32Array(config.appearance.colorCount),
       config.appearance.palette
     );
-    let cur = new Float32Array(0);
-    let next = new Float32Array(0);
     let random = createSeededRandom(config.simulation.seed);
+    let heat = new Uint8Array(0);
     let accumulator = 0;
     let width = 1;
     let height = 1;
-    const stepSeconds = 1 / config.simulation.stepHz;
+    function spread() {
+      const lastRow = buffer.height - 1;
+      for (let x = 0; x < buffer.width; x++) {
+        heat[lastRow * buffer.width + x] = random() < config.simulation.sourceDensity ? config.simulation.sourceIntensity : Math.floor(random() * config.simulation.sourceVariance);
+      }
+      for (let y = 1; y < buffer.height; y++) {
+        const row = y * buffer.width;
+        const previousRow = (y - 1) * buffer.width;
+        for (let x = 0; x < buffer.width; x++) {
+          const cooling = Math.floor(random() * (config.simulation.cooling + 1));
+          const drift = Math.floor((random() * 2 - 1) * (config.simulation.horizontalDrift + 1));
+          const targetX = (x + drift + buffer.width) % buffer.width;
+          heat[previousRow + targetX] = Math.max(0, heat[row + x] - cooling);
+        }
+      }
+    }
     return {
       resize(nextWidth, nextHeight) {
         width = nextWidth;
         height = nextHeight;
         resizePixelBuffer(buffer, width * config.render.resolution, height * config.render.resolution);
-        const cells = buffer.width * buffer.height;
-        cur = new Float32Array(cells);
-        next = new Float32Array(cells);
         random = createSeededRandom(config.simulation.seed);
+        heat = new Uint8Array(buffer.width * buffer.height);
         accumulator = 0;
       },
       render({ delta }) {
         accumulator += delta * config.motion.speed;
+        const stepSeconds = 1 / config.simulation.stepHz;
         let steps = 0;
         while (accumulator >= stepSeconds && steps < config.simulation.maxCatchUpSteps) {
-          stepHeat(cur, next, buffer.width, buffer.height, config.simulation, random);
-          const tmp = cur;
-          cur = next;
-          next = tmp;
+          spread();
           accumulator -= stepSeconds;
           steps++;
         }
-        paint(palette, cur, buffer.pixels);
+        for (let i = 0; i < heat.length; i++) {
+          const paletteIndex = Math.round(heat[i] / 255 * (palette.length - 1));
+          buffer.pixels[i] = palette[paletteIndex];
+        }
         presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
       }
     };
@@ -932,53 +924,35 @@
     render: { resolution: 0.25, smoothing: false },
     motion: { speed: 1 },
     appearance: {
-      // Defensive 2-colour placeholder so a skinless resolve still validates. The
-      // real classic ramp (black → burgundy → orange → yellow → near-white) lives
-      // in skins.js and overrides this through the resolver merge.
-      palette: ["#000000", "#ff7a00"],
+      palette: ["#000000", "#ff0000", "#ffff00", "#ffffff"],
       colorCount: 256,
       backgroundColor: "#000000"
     },
     simulation: {
       seed: 1993,
       stepHz: 60,
-      sourceWidthFrac: 0.8,
-      sourceDepthFrac: 0.06,
-      sourceIntensity: 1,
-      cooling: 0.25,
-      riseFrac: 1,
+      sourceDensity: 0.65,
+      sourceIntensity: 255,
+      sourceVariance: 96,
+      cooling: 2,
+      horizontalDrift: 1,
       maxCatchUpSteps: 3
     }
   });
   function validateFire(config) {
-    const sim = config.simulation;
-    assertNumber(sim.seed, "fire.simulation.seed", { min: 0, max: 4294967295, integer: true });
-    assertNumber(sim.stepHz, "fire.simulation.stepHz", { min: 1, max: 240 });
-    assertNumber(sim.sourceWidthFrac, "fire.simulation.sourceWidthFrac", { min: 0.01, max: 1 });
-    assertNumber(sim.sourceDepthFrac, "fire.simulation.sourceDepthFrac", { min: 0.01, max: 0.5 });
-    assertNumber(sim.sourceIntensity, "fire.simulation.sourceIntensity", { min: 0, max: 1 });
-    assertNumber(sim.cooling, "fire.simulation.cooling", { min: 0, max: 1 });
-    assertNumber(sim.riseFrac, "fire.simulation.riseFrac", { min: 0.05, max: 4 });
-    assertNumber(sim.maxCatchUpSteps, "fire.simulation.maxCatchUpSteps", { min: 1, max: 20, integer: true });
+    assertNumber(config.simulation.seed, "fire.simulation.seed", { min: 0, max: 4294967295, integer: true });
+    assertNumber(config.simulation.stepHz, "fire.simulation.stepHz", { min: 1, max: 240 });
+    assertNumber(config.simulation.sourceDensity, "fire.simulation.sourceDensity", { min: 0, max: 1 });
+    assertNumber(config.simulation.sourceIntensity, "fire.simulation.sourceIntensity", { min: 0, max: 255, integer: true });
+    assertNumber(config.simulation.sourceVariance, "fire.simulation.sourceVariance", { min: 0, max: 255, integer: true });
+    assertNumber(config.simulation.cooling, "fire.simulation.cooling", { min: 0, max: 32, integer: true });
+    assertNumber(config.simulation.horizontalDrift, "fire.simulation.horizontalDrift", { min: 0, max: 16, integer: true });
+    assertNumber(config.simulation.maxCatchUpSteps, "fire.simulation.maxCatchUpSteps", { min: 1, max: 20, integer: true });
   }
 
   // src/effects/fire/skins.js
   var FIRE_SKINS = Object.freeze({
-    classic: Object.freeze({
-      appearance: Object.freeze({
-        palette: Object.freeze([
-          "#000000",
-          "#2b0000",
-          "#8b0a0a",
-          "#d83a0a",
-          "#ff7a00",
-          "#ffb400",
-          "#ffe55c",
-          "#fffff0"
-        ]),
-        colorCount: 256
-      })
-    })
+    classic: Object.freeze({})
   });
 
   // src/effects/fire/profiles.js
@@ -986,15 +960,12 @@
   var RUNTIME_FULLSCREEN_MOBILE2 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP2 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE2 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var RENDER_FULLSCREEN_DESKTOP = { render: { resolution: 0.25 } };
-  var RENDER_FULLSCREEN_MOBILE = { render: { resolution: 0.2 } };
-  var RENDER_PREVIEW_DESKTOP = { render: { resolution: 0.2 } };
-  var RENDER_PREVIEW_MOBILE = { render: { resolution: 0.15 } };
+  var PREVIEW_RENDER = { render: { resolution: 0.2 } };
   var FIRE_PROFILES = buildProfiles({
-    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP2, ...RENDER_FULLSCREEN_DESKTOP },
-    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE2, ...RENDER_FULLSCREEN_MOBILE },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP2, ...RENDER_PREVIEW_DESKTOP },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE2, ...RENDER_PREVIEW_MOBILE }
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP2 },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE2 },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP2, ...PREVIEW_RENDER },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE2, ...PREVIEW_RENDER }
   });
 
   // src/effects/fire/index.js
@@ -1594,11 +1565,6 @@
   };
 
   // src/effects/mandelbrot/mandelbrot-core.js
-  var LOG2 = Math.log(2);
-  var DEFAULT_COLOR_SCALE = 1;
-  var DEFAULT_COLOR_CURVE = 1;
-  var DEFAULT_COLOR_OFFSET = 0;
-  var DEFAULT_CYCLE_SPEED = 0;
   function mandelbrotZoom(time, {
     minZoom,
     maxZoom,
@@ -1616,27 +1582,6 @@
     const shifted = real - 0.25;
     const q = shifted * shifted + imaginary * imaginary;
     return q * (q + shifted) <= 0.25 * imaginary * imaginary || (real + 1) * (real + 1) + imaginary * imaginary <= 0.0625;
-  }
-  function mandelbrotPaletteIndex({
-    iteration,
-    mag2,
-    colorScale,
-    colorCurve,
-    cyclePhase,
-    paletteLength
-  }) {
-    const guardedMag2 = mag2 < 1.0001 ? 1.0001 : mag2;
-    const logZn = Math.log(guardedMag2) / 2;
-    const ratio = logZn / LOG2;
-    const nu = Math.log(ratio < 1e-12 ? 1e-12 : ratio) / LOG2;
-    const rawSmooth = iteration + 1 - nu;
-    let colorCoord = rawSmooth * colorScale + cyclePhase;
-    colorCoord -= Math.floor(colorCoord);
-    const gamma = colorCurve < 0.01 ? 0.01 : colorCurve > 100 ? 100 : colorCurve;
-    const shaped = colorCoord ** (1 / gamma);
-    const lastIndex = paletteLength - 1;
-    const index = Math.floor(shaped * lastIndex + 0.5);
-    return index < 0 ? 0 : index > lastIndex ? lastIndex : index;
   }
   function renderMandelbrotPixels({
     pixels,
@@ -1658,13 +1603,7 @@
     );
     const maxIterations = config.algorithm.maxIterations ?? calculatedIterations;
     const escapeSquared = config.algorithm.escapeRadius ** 2;
-    const appearance = config.appearance ?? {};
-    const colorScale = appearance.colorScale ?? DEFAULT_COLOR_SCALE;
-    const colorCurve = appearance.colorCurve ?? DEFAULT_COLOR_CURVE;
-    const colorOffset = appearance.colorOffset ?? DEFAULT_COLOR_OFFSET;
-    const cycleSpeed = appearance.cycleSpeed ?? DEFAULT_CYCLE_SPEED;
-    const cyclePhase = time * (config.motion?.speed ?? 1) * cycleSpeed + colorOffset;
-    const paletteLength = palette.length;
+    const log2 = Math.log(2);
     const realStep = 2 * span / width;
     const imaginaryStep = 2 * span / aspect / height;
     const realStart = config.camera.centerX - span;
@@ -1691,19 +1630,14 @@
           zImaginarySquared = zImaginary * zImaginary;
           iteration++;
         }
-        const mag2 = zRealSquared + zImaginarySquared;
-        if (mag2 < escapeSquared) {
+        if (iteration === maxIterations) {
           pixels[index++] = interiorColor;
           continue;
         }
-        pixels[index++] = palette[mandelbrotPaletteIndex({
-          iteration,
-          mag2,
-          colorScale,
-          colorCurve,
-          cyclePhase,
-          paletteLength
-        })];
+        const logZn = Math.log(zRealSquared + zImaginarySquared) / 2;
+        const nu = Math.log(logZn / log2) / log2;
+        const smooth = iteration + 1 - nu;
+        pixels[index++] = palette[Math.abs(Math.floor(smooth * 8)) % palette.length];
       }
     }
     return { zoom, maxIterations };
@@ -1720,7 +1654,7 @@ const vec2 POSITIONS[3] = vec2[3](
 void main() {
   gl_Position = vec4(POSITIONS[gl_VertexID], 0.0, 1.0);
 }`;
-  var MANDELBROT_FRAGMENT_SHADER = `#version 300 es
+  var FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 precision highp int;
 
@@ -1737,9 +1671,6 @@ uniform sampler2D uPalette;
 uniform int uPaletteWidth;
 uniform int uPaletteSize;
 uniform vec4 uInteriorColor;
-uniform float uColorScale;
-uniform float uColorCurve;
-uniform float uCyclePhase;
 
 out vec4 fragmentColor;
 
@@ -1827,23 +1758,11 @@ void main() {
     return;
   }
 
-  // Continuous normalized escape colouring — mirrors mandelbrot-core.js
-  // mandelbrotPaletteIndex line for line (same guards, same LOG2, same ramp
-  // wrap). The parity test asserts the guarded expressions below appear
-  // verbatim in this shader source. The perturbation path above only changes
-  // how z is iterated; once escaped, dot(z,z) feeds this identical formula, so
-  // the Canvas2D and WebGL outputs agree.
   const float LOG_TWO = 0.6931471805599453;
-  float mag2 = max(dot(z, z), 1.0001);
-  float logZn = log(mag2) * 0.5;
-  float ratio = logZn / LOG_TWO;
-  float nu = log(max(ratio, 1e-12)) / LOG_TWO;
-  float rawSmooth = float(iteration) + 1.0 - nu;
-  float colorCoord = rawSmooth * uColorScale + uCyclePhase;
-  colorCoord = colorCoord - floor(colorCoord);
-  float shaped = pow(colorCoord, 1.0 / clamp(uColorCurve, 0.01, 100.0));
-  float paletteCoord = shaped * (float(uPaletteSize) - 1.0);
-  int paletteIndex = int(clamp(floor(paletteCoord + 0.5), 0.0, float(uPaletteSize) - 1.0));
+  float logZn = log(dot(z, z)) * 0.5;
+  float nu = log(logZn / LOG_TWO) / LOG_TWO;
+  float smoothValue = float(iteration) + 1.0 - nu;
+  int paletteIndex = int(abs(floor(smoothValue * 8.0))) % uPaletteSize;
   fragmentColor = paletteValue(paletteIndex);
 }`;
   function compileShader(gl, type, source) {
@@ -1860,7 +1779,7 @@ void main() {
   }
   function createProgram(gl) {
     const vertex = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
-    const fragment = compileShader(gl, gl.FRAGMENT_SHADER, MANDELBROT_FRAGMENT_SHADER);
+    const fragment = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
     const program = gl.createProgram();
     if (!program) throw new Error("Unable to create Mandelbrot WebGL2 program.");
     gl.attachShader(program, vertex);
@@ -2015,10 +1934,7 @@ void main() {
         "uPalette",
         "uPaletteWidth",
         "uPaletteSize",
-        "uInteriorColor",
-        "uColorScale",
-        "uColorCurve",
-        "uCyclePhase"
+        "uInteriorColor"
       ];
       return Object.fromEntries(names.map((name) => [name, gl.getUniformLocation(program, name)]));
     }
@@ -2095,7 +2011,6 @@ void main() {
         );
         const frameIterations = config.algorithm.maxIterations ?? calculatedIterations;
         const usePerturbation = zoom >= 1e3 && referenceOrbitValid;
-        const cyclePhase = time * config.motion.speed * config.appearance.cycleSpeed + config.appearance.colorOffset;
         gl.useProgram(program);
         gl.viewport(0, 0, width, height);
         gl.uniform2f(locations.uResolution, width, height);
@@ -2111,9 +2026,6 @@ void main() {
         gl.uniform1i(locations.uPaletteWidth, paletteShape.width);
         gl.uniform1i(locations.uPaletteSize, palette.length);
         gl.uniform4f(locations.uInteriorColor, ...interiorColor);
-        gl.uniform1f(locations.uColorScale, config.appearance.colorScale);
-        gl.uniform1f(locations.uColorCurve, config.appearance.colorCurve);
-        gl.uniform1f(locations.uCyclePhase, cyclePhase);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
       },
       getStats() {
@@ -2186,13 +2098,6 @@ void main() {
   }
 
   // src/effects/mandelbrot/config.js
-  var HEX_COLOR_PATTERN = /^#(?:[\da-f]{3}|[\da-f]{6})$/i;
-  function assertHexColor(value, path) {
-    assertString(value, path);
-    if (!HEX_COLOR_PATTERN.test(value)) {
-      throw new TypeError(`${path} must use #rgb or #rrggbb.`);
-    }
-  }
   var MANDELBROT_DEFAULTS = createEffectDefaults({
     render: { backend: "canvas2d", resolution: 0.2, smoothing: false },
     motion: { speed: 1, cycleSeconds: 28, startPhase: 0 },
@@ -2214,19 +2119,7 @@ void main() {
       ],
       colorCount: 1024,
       backgroundColor: "#000000",
-      interiorColor: "#000000",
-      // Continuous escape-coloring visual knobs (issue #10). These are
-      // presentation only — the fractal geometry (camera, bailout, iteration
-      // ceiling) lives in `camera`/`algorithm`. The defaults below are the
-      // identity baseline; the `classic` skin (skins.js) overrides them with the
-      // authored continuous ramp. `colorScale` is the tunable replacement for the
-      // old hard-coded `*8` band factor; `colorCurve` is contrast/gamma on the
-      // normalized palette coordinate; `colorOffset`+`cycleSpeed` give a slow
-      // continuous drift of the palette coordinate WITHOUT changing geometry.
-      colorScale: 1,
-      colorCurve: 1,
-      colorOffset: 0,
-      cycleSpeed: 0
+      interiorColor: "#000000"
     },
     camera: {
       centerX: -0.7436438870371587,
@@ -2248,12 +2141,6 @@ void main() {
     }
     assertNumber(config.motion.cycleSeconds, "mandelbrot.motion.cycleSeconds", { min: Number.MIN_VALUE });
     assertNumber(config.motion.startPhase, "mandelbrot.motion.startPhase", { min: 0, max: 1 });
-    assertHexColor(config.appearance.interiorColor, "mandelbrot.appearance.interiorColor");
-    assertHexColor(config.appearance.backgroundColor, "mandelbrot.appearance.backgroundColor");
-    assertNumber(config.appearance.colorScale, "mandelbrot.appearance.colorScale", { min: 0 });
-    assertNumber(config.appearance.colorCurve, "mandelbrot.appearance.colorCurve", { min: 0 });
-    assertNumber(config.appearance.colorOffset, "mandelbrot.appearance.colorOffset");
-    assertNumber(config.appearance.cycleSpeed, "mandelbrot.appearance.cycleSpeed", { min: 0 });
     for (const key of ["centerX", "centerY"]) {
       assertNumber(config.camera[key], `mandelbrot.camera.${key}`);
     }
@@ -2275,18 +2162,7 @@ void main() {
 
   // src/effects/mandelbrot/skins.js
   var MANDELBROT_SKINS = Object.freeze({
-    classic: Object.freeze({
-      appearance: {
-        // ~0.06 palette-widths per unit smooth-iteration: a slow, continuous ramp
-        // instead of the old eight-hard-bands-per-iteration modulo stripe.
-        colorScale: 0.06,
-        colorCurve: 1,
-        colorOffset: 0,
-        // One full palette traversal every ~50 s — a gentle continuous shimmer
-        // that does not alter the auto-zoom geometry.
-        cycleSpeed: 0.02
-      }
-    })
+    classic: Object.freeze({})
   });
 
   // src/effects/mandelbrot/profiles.js
@@ -2294,28 +2170,12 @@ void main() {
   var RUNTIME_FULLSCREEN_MOBILE6 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP6 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE6 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_RENDER3 = { render: { resolution: 0.19, smoothing: true } };
-  var CAMERA_LANDSCAPE = {
-    camera: {
-      centerX: -0.7436438870371587,
-      centerY: 0.1318259042053119,
-      minZoom: 1,
-      maxZoom: 1e6
-    }
-  };
-  var CAMERA_PORTRAIT = {
-    camera: {
-      centerX: -0.7436438870371587,
-      centerY: 0.1318259042053119,
-      minZoom: 2.4,
-      maxZoom: 8e5
-    }
-  };
+  var PREVIEW_RENDER3 = { render: { resolution: 0.15, smoothing: true } };
   var MANDELBROT_PROFILES = buildProfiles({
-    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP6, ...CAMERA_LANDSCAPE },
-    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE6, ...CAMERA_PORTRAIT },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP6, ...PREVIEW_RENDER3, ...CAMERA_LANDSCAPE },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE6, ...PREVIEW_RENDER3, ...CAMERA_PORTRAIT }
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP6 },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE6 },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP6, ...PREVIEW_RENDER3 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE6, ...PREVIEW_RENDER3 }
   });
 
   // src/effects/mandelbrot/index.js
