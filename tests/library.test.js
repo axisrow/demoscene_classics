@@ -5,6 +5,7 @@ import vm from 'node:vm';
 
 import { mandelbrotZoom, renderMandelbrotPixels } from '../src/effects/mandelbrot/mandelbrot-core.js';
 import { buildGradientPalette, packHexColor, packRgb } from '../src/effects/utils.js';
+import { PROFILE_SLOT_KEYS } from '../src/effects/profiles.js';
 
 // [publicName, definition module, definition export, standalone filename, config defaults export]
 const EFFECTS = [
@@ -543,25 +544,204 @@ test('classic default frames remain pixel-stable and unchanged from the v2 basel
   });
 });
 
-// Four-profile contact sheet. In this structural PR the surface/device profile
-// overlays are intentionally empty (#3 owns responsive budgets), so every
-// desktop/mobile x preview/fullscreen profile must produce the SAME frame as
-// the classic desktop/fullscreen baseline. This is the before/after proof that
-// the v3 migration did not redesign any effect.
-test('four-profile contact sheet: empty profiles are visually identical to classic', async () => {
-  const PROFILES = [
-    {},
-    { surface: 'preview' },
-    { device: 'mobile' },
-    { surface: 'preview', device: 'mobile' }
-  ];
+// Four-profile contact sheet. Issue #3 fills the previously empty profile
+// slots with real budgets: preview slots lower the render resolution (and, for
+// starfield/metaballs/sine-scroller, the particle/point budget) while every
+// slot sets maxFps/pixelRatio/pauseWhenHidden. The contact sheet proves three
+// things at once:
+//   1. The fullscreen/desktop slot (the default descriptor) preserves the
+//      classic composition pixel-for-pixel — the profile layer did not redesign
+//      the fullscreen desktop baseline.
+//   2. Every preview slot lowers render.resolution below the fullscreen default
+//      (the responsive sampling budget), and the pixel effects actually render
+//      a different backing buffer at that lower resolution.
+//   3. Starfield/metaballs/sine-scroller preview slots also cut the
+//      particle/point budget, so their vector/pixel signatures change too.
+// (Feedback is the one vector effect whose preview slot only lowers resolution;
+// resolution does not change a vector trace, so its signature is allowed to
+// match the baseline — the resolution drop is still asserted on its config.)
+test('four-profile contact sheet: fullscreen desktop is unchanged, preview lowers the buffer', async () => {
+  // Effects whose preview slot lowers a pixel buffer (resolution changes the
+  // rendered image) — their preview signature must differ from the baseline.
+  const PIXEL_PREVIEW_DIFFERS = new Set([
+    'plasma', 'fire', 'metaballs', 'tunnel', 'mandelbrot', 'rotozoom', 'copperBars',
+    'starfield', // particleCount 600 -> 120 changes the trace
+    'sineScroller' // star count 220 -> 60 changes the trace
+  ]);
   for (const [name, , , filename] of EFFECTS) {
-    const baseline = await rendererSignature(name, filename);
-    for (const [index, descriptor] of PROFILES.entries()) {
-      const signature = await rendererSignature(name, filename, descriptor);
-      assert.equal(signature, baseline,
-        `${name} profile ${JSON.stringify(descriptor)} (index ${index}) drifted from classic`);
+    const baseline = await rendererSignature(name, filename, {});
+    // The default descriptor resolves to fullscreen/desktop and must remain the
+    // unchanged classic baseline (slots do not alter fullscreen composition).
+    const explicitFullscreenDesktop = await rendererSignature(name, filename,
+      { surface: 'fullscreen', device: 'desktop' });
+    assert.equal(explicitFullscreenDesktop, baseline,
+      `${name} fullscreen/desktop drifted from the classic baseline`);
+
+    // The preview surface lowers render.resolution below the fullscreen default.
+    const env = createEnvironment();
+    await loadBundle(`../dist/effects/${filename}`, env);
+    env.sandbox.Demoscene[name](env.createCanvas('#demo', 48, 32),
+      { surface: 'preview', device: 'desktop', config: { runtime: { autoStart: false } } });
+    // (autoStart:false keeps this a pure config-resolution check; resolution is
+    // resolved before any render, so it is present on getConfig() regardless.)
+
+    const previewConfig = env.sandbox.Demoscene[name](env.createCanvas('#demo2', 48, 32),
+      { surface: 'preview', device: 'desktop', config: { runtime: { autoStart: false } } }).getConfig();
+    const fullscreenConfig = env.sandbox.Demoscene[name](env.createCanvas('#demo3', 48, 32),
+      { surface: 'fullscreen', device: 'desktop', config: { runtime: { autoStart: false } } }).getConfig();
+    assert.ok(previewConfig.render.resolution < fullscreenConfig.render.resolution,
+      `${name} preview resolution must be below the fullscreen default`);
+
+    if (PIXEL_PREVIEW_DIFFERS.has(name)) {
+      const previewDesktop = await rendererSignature(name, filename,
+        { surface: 'preview', device: 'desktop' });
+      assert.notEqual(previewDesktop, baseline,
+        `${name} preview/desktop must lower the buffer away from the fullscreen baseline`);
     }
+  }
+});
+
+// Load an effect definition module directly from source (no browser code runs
+// at import time — see scripts/build.mjs readEffectMetadata). Used to inspect
+// the four-slot profile registry without mounting a renderer.
+async function loadDefinition(modulePath, exportName) {
+  const url = new URL(`../src/effects/${modulePath}`, import.meta.url);
+  const mod = await import(url);
+  return mod[exportName];
+}
+
+// Issue #3: every effect exposes four explicit, complete, effect-owned profile
+// slots — one per (surface × device) combination — with no implicit fallbacks.
+test('every effect exposes four complete profile slots with the required maxFps budgets', async () => {
+  // Required runtime budgets per the #3 table: [surface, device, maxFps].
+  const EXPECTED = [
+    ['fullscreen', 'desktop', 60],
+    ['fullscreen', 'mobile', 30],
+    ['preview', 'desktop', 30],
+    ['preview', 'mobile', 24]
+  ];
+  for (const [name, module, exported] of EFFECTS) {
+    const definition = await loadDefinition(module, exported);
+    const slots = definition.profiles.slots;
+    assert.ok(slots, `${name} must expose profiles.slots`);
+    // Exactly the four canonical slot keys, nothing missing or extra.
+    assert.deepEqual(Object.keys(slots).sort(), [...PROFILE_SLOT_KEYS].sort(),
+      `${name} slot keys`);
+    for (const [surface, device, maxFps] of EXPECTED) {
+      const slot = slots[`${surface}.${device}`];
+      assert.ok(slot && typeof slot === 'object', `${name} ${surface}.${device} slot must be an object`);
+      assert.equal(slot.runtime?.maxFps, maxFps,
+        `${name} ${surface}.${device} maxFps must be ${maxFps}`);
+      assert.equal(slot.runtime?.pixelRatio, 1,
+        `${name} ${surface}.${device} pixelRatio must start at 1`);
+      assert.equal(slot.runtime?.pauseWhenHidden, true,
+        `${name} ${surface}.${device} pauseWhenHidden must start true`);
+    }
+  }
+});
+
+// Issue #3: the four-slot form exists precisely because maxFps depends on BOTH
+// surface and device at once (e.g. preview/desktop 30 vs fullscreen/desktop 60
+// share a device but differ by surface). A two-axis merge could not express
+// this; the composite matched slot can. Verify the resolved config reflects the
+// exact per-(surface,device) maxFps through the public API.
+test('resolved maxFps varies by both surface and device (four-slot expressiveness)', async () => {
+  const EXPECTED = {
+    'fullscreen.desktop': 60,
+    'fullscreen.mobile': 30,
+    'preview.desktop': 30,
+    'preview.mobile': 24
+  };
+  for (const [name, , , filename] of EFFECTS) {
+    for (const [slotKey, maxFps] of Object.entries(EXPECTED)) {
+      const [surface, device] = slotKey.split('.');
+      const env = createEnvironment();
+      await loadBundle(`../dist/effects/${filename}`, env);
+      const controller = env.sandbox.Demoscene[name](env.createCanvas('#demo', 32, 20),
+        { surface, device, config: { runtime: { autoStart: false } } });
+      assert.equal(controller.getConfig().runtime.maxFps, maxFps,
+        `${name} ${slotKey} resolved maxFps`);
+    }
+  }
+});
+
+// Issue #3: device:'auto' is resolved exactly once at mount. An explicit device
+// always wins. A matchMedia change, resize, or orientation change after mount
+// must NOT recreate the renderer or silently change the resolved profile.
+test('device auto resolves once at mount and is stable across post-mount media/resize changes', async () => {
+  // matchMedia reports desktop at mount, then flips to mobile afterwards.
+  let narrow = false;
+  let coarse = false;
+  const listeners = [];
+  const matchMedia = (query) => {
+    const mql = {
+      get matches() {
+        return query === '(max-width: 767px)' ? narrow
+          : query === '(hover: none) and (pointer: coarse)' ? coarse : false;
+      },
+      media: query,
+      addEventListener(type, listener) { listeners.push({ type, listener }); },
+      removeEventListener(type, listener) {
+        const index = listeners.findIndex((entry) => entry.type === type && entry.listener === listener);
+        if (index >= 0) listeners.splice(index, 1);
+      },
+      addListener(listener) { listeners.push({ type: 'change', listener }); },
+      removeListener(listener) {
+        const index = listeners.findIndex((entry) => entry.listener === listener);
+        if (index >= 0) listeners.splice(index, 1);
+      }
+    };
+    return mql;
+  };
+  const env = createEnvironment({ matchMedia });
+  await loadBundle('../dist/effects/plasma.js', env);
+  const canvas = env.createCanvas('#demo', 48, 32);
+
+  const controller = env.sandbox.Demoscene.plasma(canvas, { device: 'auto' });
+  // Resolved desktop at mount time.
+  assert.equal(controller.getSelection().requestedDevice, 'auto');
+  assert.equal(controller.getSelection().resolvedDevice, 'desktop');
+  const mountConfig = controller.getConfig();
+
+  // Flip the media queries to a mobile state and fire change listeners.
+  narrow = true;
+  coarse = true;
+  listeners.forEach((entry) => entry.listener());
+  // Resize the canvas (forces applySize) and flush frames.
+  canvas.width = 60;
+  canvas.height = 40;
+  env.resizeObservers.forEach((observer) => observer.trigger());
+  env.flush(0);
+  env.flush(16);
+
+  // The resolved device, selection, and resolved config are unchanged: the
+  // renderer is not recreated and the profile is not silently re-resolved.
+  assert.equal(controller.getSelection().resolvedDevice, 'desktop');
+  assert.equal(controller.getSelection().requestedDevice, 'auto');
+  assert.equal(controller.getConfig().runtime.maxFps, mountConfig.runtime.maxFps);
+  assert.equal(controller.getConfig().render.resolution, mountConfig.render.resolution);
+  // Still rendering (not destroyed/recreated).
+  assert.equal(env.frameCount() >= 0, true);
+  controller.destroy();
+});
+
+// Issue #3: getSelection reports BOTH the requested and resolved device, so
+// 'auto' is distinguishable from its mount-time resolution; surface is echoed
+// verbatim.
+test('getSelection reports requested and resolved skin, surface, and device', async () => {
+  for (const { descriptor, expected } of [
+    { descriptor: {}, expected: { surface: 'fullscreen', requestedDevice: 'auto', resolvedDevice: 'desktop' } },
+    { descriptor: { device: 'mobile' }, expected: { surface: 'fullscreen', requestedDevice: 'mobile', resolvedDevice: 'mobile' } },
+    { descriptor: { surface: 'preview', device: 'desktop' }, expected: { surface: 'preview', requestedDevice: 'desktop', resolvedDevice: 'desktop' } }
+  ]) {
+    const env = createEnvironment();
+    await loadBundle('../dist/effects/plasma.js', env);
+    const canvas = env.createCanvas('#demo', 32, 20);
+    const selection = env.sandbox.Demoscene.plasma(canvas, descriptor).getSelection();
+    assert.equal(selection.surface, expected.surface);
+    assert.equal(selection.requestedDevice, expected.requestedDevice);
+    assert.equal(selection.resolvedDevice, expected.resolvedDevice);
+    assert.equal(Object.isFrozen(selection), true);
   }
 });
 

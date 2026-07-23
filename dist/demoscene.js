@@ -486,9 +486,9 @@
     const { requested, presetName, overrides } = resolveSkin(name, input.skin, skins);
     const preset = skins[presetName] ?? {};
     const surfaceName = resolveSurface(name, input.surface, profiles.surfaces);
-    const surfaceProfile = profiles.surfaces[surfaceName] ?? {};
     const { requestedDevice, resolvedDevice } = resolveDevice(name, input.device, profiles.devices);
-    const deviceProfile = profiles.devices[resolvedDevice] ?? {};
+    const slotKey = `${surfaceName}.${resolvedDevice}`;
+    const profileOverlay = profiles.slots?.[slotKey] ?? {};
     const explicit = input.config ?? {};
     if (!isPlainObject(explicit)) {
       throw new TypeError(`${name}.config must be an object.`);
@@ -501,8 +501,7 @@
     let config = cloneValue(configDefaults);
     config = mergeValue(config, preset);
     config = mergeValue(config, overrides);
-    config = mergeValue(config, surfaceProfile);
-    config = mergeValue(config, deviceProfile);
+    config = mergeValue(config, profileOverlay);
     config = mergeValue(config, explicit);
     validateCommonConfig(name, config);
     validate(config);
@@ -730,16 +729,64 @@
     classic: Object.freeze({})
   });
 
+  // src/effects/profiles.js
+  var SURFACES = ["fullscreen", "preview"];
+  var DEVICES = ["desktop", "mobile"];
+  var SLOT_KEYS = ["fullscreen.desktop", "fullscreen.mobile", "preview.desktop", "preview.mobile"];
+  function buildProfiles(slots) {
+    if (!slots || typeof slots !== "object") {
+      throw new TypeError("buildProfiles expects a slots object.");
+    }
+    for (const key of SLOT_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(slots, key)) {
+        throw new RangeError(`Profile slot '${key}' is missing; every effect must define all four slots.`);
+      }
+      if (!isPlainObject2(slots[key])) {
+        throw new RangeError(`Profile slot '${key}' must be a plain object.`);
+      }
+    }
+    for (const key of Object.keys(slots)) {
+      if (!SLOT_KEYS.includes(key)) {
+        throw new RangeError(`Unknown profile slot '${key}'. Expected one of: ${SLOT_KEYS.join(", ")}.`);
+      }
+    }
+    return Object.freeze({
+      slots: Object.freeze(cloneSlots(slots)),
+      surfaces: Object.freeze({
+        fullscreen: Object.freeze({}),
+        preview: Object.freeze({})
+      }),
+      devices: Object.freeze({
+        desktop: Object.freeze({}),
+        mobile: Object.freeze({})
+      })
+    });
+  }
+  function isPlainObject2(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+  function cloneSlots(slots) {
+    const result = {};
+    for (const key of SLOT_KEYS) {
+      result[key] = { ...slots[key] };
+    }
+    return result;
+  }
+  var PROFILE_SURFACES = Object.freeze(SURFACES);
+  var PROFILE_DEVICES = Object.freeze(DEVICES);
+  var PROFILE_SLOT_KEYS = Object.freeze(SLOT_KEYS);
+
   // src/effects/plasma/profiles.js
-  var PLASMA_PROFILES = Object.freeze({
-    surfaces: Object.freeze({
-      fullscreen: Object.freeze({}),
-      preview: Object.freeze({})
-    }),
-    devices: Object.freeze({
-      desktop: Object.freeze({}),
-      mobile: Object.freeze({})
-    })
+  var RUNTIME_FULLSCREEN_DESKTOP = { runtime: { maxFps: 60, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_FULLSCREEN_MOBILE = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_DESKTOP = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_MOBILE = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
+  var PREVIEW_RENDER = { render: { resolution: 0.2 } };
+  var PLASMA_PROFILES = buildProfiles({
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP, ...PREVIEW_RENDER },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE, ...PREVIEW_RENDER }
   });
 
   // src/effects/plasma/index.js
@@ -850,15 +897,16 @@
   });
 
   // src/effects/fire/profiles.js
-  var FIRE_PROFILES = Object.freeze({
-    surfaces: Object.freeze({
-      fullscreen: Object.freeze({}),
-      preview: Object.freeze({})
-    }),
-    devices: Object.freeze({
-      desktop: Object.freeze({}),
-      mobile: Object.freeze({})
-    })
+  var RUNTIME_FULLSCREEN_DESKTOP2 = { runtime: { maxFps: 60, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_FULLSCREEN_MOBILE2 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_DESKTOP2 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_MOBILE2 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
+  var PREVIEW_RENDER2 = { render: { resolution: 0.2 } };
+  var FIRE_PROFILES = buildProfiles({
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP2 },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE2 },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP2, ...PREVIEW_RENDER2 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE2, ...PREVIEW_RENDER2 }
   });
 
   // src/effects/fire/index.js
@@ -991,15 +1039,16 @@
   });
 
   // src/effects/starfield/profiles.js
-  var STARFIELD_PROFILES = Object.freeze({
-    surfaces: Object.freeze({
-      fullscreen: Object.freeze({}),
-      preview: Object.freeze({})
-    }),
-    devices: Object.freeze({
-      desktop: Object.freeze({}),
-      mobile: Object.freeze({})
-    })
+  var RUNTIME_FULLSCREEN_DESKTOP3 = { runtime: { maxFps: 60, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_FULLSCREEN_MOBILE3 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_DESKTOP3 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_MOBILE3 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
+  var PREVIEW_BUDGET = { render: { resolution: 0.7 }, particles: { particleCount: 120 } };
+  var STARFIELD_PROFILES = buildProfiles({
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP3 },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE3 },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP3, ...PREVIEW_BUDGET },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE3, ...PREVIEW_BUDGET }
   });
 
   // src/effects/starfield/index.js
@@ -1147,15 +1196,16 @@
   });
 
   // src/effects/metaballs/profiles.js
-  var METABALLS_PROFILES = Object.freeze({
-    surfaces: Object.freeze({
-      fullscreen: Object.freeze({}),
-      preview: Object.freeze({})
-    }),
-    devices: Object.freeze({
-      desktop: Object.freeze({}),
-      mobile: Object.freeze({})
-    })
+  var RUNTIME_FULLSCREEN_DESKTOP4 = { runtime: { maxFps: 60, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_FULLSCREEN_MOBILE4 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_DESKTOP4 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_MOBILE4 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
+  var PREVIEW_BUDGET2 = { render: { resolution: 0.2 }, field: { pointCount: 3 } };
+  var METABALLS_PROFILES = buildProfiles({
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP4 },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE4 },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP4, ...PREVIEW_BUDGET2 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE4, ...PREVIEW_BUDGET2 }
   });
 
   // src/effects/metaballs/index.js
@@ -1261,15 +1311,16 @@
   });
 
   // src/effects/tunnel/profiles.js
-  var TUNNEL_PROFILES = Object.freeze({
-    surfaces: Object.freeze({
-      fullscreen: Object.freeze({}),
-      preview: Object.freeze({})
-    }),
-    devices: Object.freeze({
-      desktop: Object.freeze({}),
-      mobile: Object.freeze({})
-    })
+  var RUNTIME_FULLSCREEN_DESKTOP5 = { runtime: { maxFps: 60, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_FULLSCREEN_MOBILE5 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_DESKTOP5 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_MOBILE5 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
+  var PREVIEW_RENDER3 = { render: { resolution: 0.2 } };
+  var TUNNEL_PROFILES = buildProfiles({
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP5 },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE5 },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP5, ...PREVIEW_RENDER3 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE5, ...PREVIEW_RENDER3 }
   });
 
   // src/effects/tunnel/index.js
@@ -1889,15 +1940,16 @@ void main() {
   });
 
   // src/effects/mandelbrot/profiles.js
-  var MANDELBROT_PROFILES = Object.freeze({
-    surfaces: Object.freeze({
-      fullscreen: Object.freeze({}),
-      preview: Object.freeze({})
-    }),
-    devices: Object.freeze({
-      desktop: Object.freeze({}),
-      mobile: Object.freeze({})
-    })
+  var RUNTIME_FULLSCREEN_DESKTOP6 = { runtime: { maxFps: 60, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_FULLSCREEN_MOBILE6 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_DESKTOP6 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_MOBILE6 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
+  var PREVIEW_RENDER4 = { render: { resolution: 0.15, smoothing: true } };
+  var MANDELBROT_PROFILES = buildProfiles({
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP6 },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE6 },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP6, ...PREVIEW_RENDER4 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE6, ...PREVIEW_RENDER4 }
   });
 
   // src/effects/mandelbrot/index.js
@@ -2071,15 +2123,16 @@ void main() {
   });
 
   // src/effects/sine-scroller/profiles.js
-  var SINE_SCROLLER_PROFILES = Object.freeze({
-    surfaces: Object.freeze({
-      fullscreen: Object.freeze({}),
-      preview: Object.freeze({})
-    }),
-    devices: Object.freeze({
-      desktop: Object.freeze({}),
-      mobile: Object.freeze({})
-    })
+  var RUNTIME_FULLSCREEN_DESKTOP7 = { runtime: { maxFps: 60, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_FULLSCREEN_MOBILE7 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_DESKTOP7 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_MOBILE7 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
+  var PREVIEW_BUDGET3 = { render: { resolution: 0.7 }, stars: { count: 60 } };
+  var SINE_SCROLLER_PROFILES = buildProfiles({
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP7 },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE7 },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP7, ...PREVIEW_BUDGET3 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE7, ...PREVIEW_BUDGET3 }
   });
 
   // src/effects/sine-scroller/index.js
@@ -2208,15 +2261,16 @@ void main() {
   });
 
   // src/effects/rotozoom/profiles.js
-  var ROTOZOOM_PROFILES = Object.freeze({
-    surfaces: Object.freeze({
-      fullscreen: Object.freeze({}),
-      preview: Object.freeze({})
-    }),
-    devices: Object.freeze({
-      desktop: Object.freeze({}),
-      mobile: Object.freeze({})
-    })
+  var RUNTIME_FULLSCREEN_DESKTOP8 = { runtime: { maxFps: 60, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_FULLSCREEN_MOBILE8 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_DESKTOP8 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_MOBILE8 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
+  var PREVIEW_RENDER5 = { render: { resolution: 0.25 } };
+  var ROTOZOOM_PROFILES = buildProfiles({
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP8 },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE8 },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP8, ...PREVIEW_RENDER5 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE8, ...PREVIEW_RENDER5 }
   });
 
   // src/effects/rotozoom/index.js
@@ -2380,15 +2434,16 @@ void main() {
   });
 
   // src/effects/feedback/profiles.js
-  var FEEDBACK_PROFILES = Object.freeze({
-    surfaces: Object.freeze({
-      fullscreen: Object.freeze({}),
-      preview: Object.freeze({})
-    }),
-    devices: Object.freeze({
-      desktop: Object.freeze({}),
-      mobile: Object.freeze({})
-    })
+  var RUNTIME_FULLSCREEN_DESKTOP9 = { runtime: { maxFps: 60, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_FULLSCREEN_MOBILE9 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_DESKTOP9 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_MOBILE9 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
+  var PREVIEW_RENDER6 = { render: { resolution: 0.7 } };
+  var FEEDBACK_PROFILES = buildProfiles({
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP9 },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE9 },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP9, ...PREVIEW_RENDER6 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE9, ...PREVIEW_RENDER6 }
   });
 
   // src/effects/feedback/index.js
@@ -2505,15 +2560,16 @@ void main() {
   });
 
   // src/effects/copper-bars/profiles.js
-  var COPPER_BARS_PROFILES = Object.freeze({
-    surfaces: Object.freeze({
-      fullscreen: Object.freeze({}),
-      preview: Object.freeze({})
-    }),
-    devices: Object.freeze({
-      desktop: Object.freeze({}),
-      mobile: Object.freeze({})
-    })
+  var RUNTIME_FULLSCREEN_DESKTOP10 = { runtime: { maxFps: 60, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_FULLSCREEN_MOBILE10 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_DESKTOP10 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_MOBILE10 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
+  var PREVIEW_RENDER7 = { render: { resolution: 0.3 } };
+  var COPPER_BARS_PROFILES = buildProfiles({
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP10 },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE10 },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP10, ...PREVIEW_RENDER7 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE10, ...PREVIEW_RENDER7 }
   });
 
   // src/effects/copper-bars/index.js

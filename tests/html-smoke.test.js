@@ -121,3 +121,31 @@ test('every HTML demo loads its browser script and renders frames', async () => 
     if (filename === 'index.html') assert.equal(environment.grid.children.length, 10);
   }
 });
+
+// Issue #3 call-site migration: the gallery must select profiles through the
+// API (surface: 'preview', device: 'auto') rather than carrying inline
+// PREVIEW_SKINS visual/budget data, and standalone pages must use fullscreen.
+test('gallery mounts preview/auto and standalone pages mount fullscreen via the API', async () => {
+  const indexHtml = await readFile(new URL('index.html', root), 'utf8');
+  // PREVIEW_SKINS no longer lives in the gallery; effect budgets are owned by
+  // the per-effect profile slots.
+  assert.match(indexHtml, /surface:\s*'preview'/);
+  assert.match(indexHtml, /device:\s*'auto'/);
+  assert.doesNotMatch(indexHtml, /PREVIEW_SKINS/);
+  // No inline effect-specific config object is passed to the gallery cards.
+  assert.doesNotMatch(indexHtml, /config:\s*PREVIEW_SKINS/);
+
+  // Each standalone effect page mounts its effect with no inline surface/device
+  // descriptor, which resolves to the fullscreen/auto defaults.
+  const standalone = (await readdir(root))
+    .filter((filename) => /^\d{2}-.+\.html$/.test(filename))
+    .sort();
+  assert.equal(standalone.length, 10);
+  for (const filename of standalone) {
+    const html = await readFile(new URL(filename, root), 'utf8');
+    assert.doesNotMatch(html, /surface:\s*['"]preview['"]/,
+      `${filename} must not opt into the preview surface`);
+    assert.doesNotMatch(html, /config:\s*\{/,
+      `${filename} must not pass inline effect config`);
+  }
+});
