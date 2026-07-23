@@ -1,56 +1,89 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { resolve } from 'node:path';
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { resolveOutDir } from '../visual/outpath.mjs';
 
 // The capture step `rm -rf`s the resolved --out directory before rewriting it,
-// so resolveOutDir must confine the destination to the harness's own output
-// area (under visual/). Containment-inside-the-repo is not enough: that still
-// accepts .git/src/scripts/dist and tracked files. These are pure path tests
-// rooted at a synthetic repo dir.
+// so resolveOutDir must confine the destination to a capture-OWNED root and
+// refuse any existing non-directory. Containment-under-visual/ was not enough
+// (it accepted tracked files like visual/compare.mjs), so an explicit allowlist
+// plus a non-directory guard are required. These tests use a real temp tree so
+// the non-directory/symlink checks exercise the filesystem.
 
-const ROOT = resolve('/repo');
+function makeRepo() {
+  const root = mkdtempSync(join(tmpdir(), 'vc-out-'));
+  mkdirSync(join(root, 'visual'), { recursive: true });
+  mkdirSync(join(root, 'visual/captures'), { recursive: true });
+  mkdirSync(join(root, 'visual/baselines'), { recursive: true });
+  // Tracked-looking harness source and files inside visual/.
+  writeFileSync(join(root, 'visual/compare.mjs'), 'export {}');
+  writeFileSync(join(root, 'visual/README.md'), '# readme');
+  writeFileSync(join(root, 'visual/baselines/manifest.json'), '{}');
+  writeFileSync(join(root, 'package.json'), '{}');
+  mkdirSync(join(root, 'src'), { recursive: true });
+  mkdirSync(join(root, 'scripts'), { recursive: true });
+  mkdirSync(join(root, 'dist'), { recursive: true });
+  return root;
+}
 
-test('accepts a path strictly inside the harness output area (visual/)', () => {
-  assert.equal(resolveOutDir(ROOT, 'visual/captures'), resolve('/repo/visual/captures'));
-  assert.equal(resolveOutDir(ROOT, 'visual/baselines'), resolve('/repo/visual/baselines'));
+test('accepts a path under a capture-owned root', () => {
+  const root = makeRepo();
+  // resolveOutDir returns a canonical (realpath) absolute path, so compare
+  // against realpathSync, not a lexical resolve (macOS /var -> /private/var).
+  assert.equal(resolveOutDir(root, 'visual/captures'), realpathSync(join(root, 'visual/captures')));
+  assert.equal(resolveOutDir(root, 'visual/baselines'), realpathSync(join(root, 'visual/baselines')));
+  assert.equal(resolveOutDir(root, 'visual/captures/sub'), realpathSync(join(root, 'visual/captures')) + '/sub');
 });
 
-test('accepts a nested relative path that stays inside visual/', () => {
-  assert.equal(resolveOutDir(ROOT, 'visual/../visual/captures'), resolve('/repo/visual/captures'));
-  assert.equal(resolveOutDir(ROOT, 'visual/_scratch/x'), resolve('/repo/visual/_scratch/x'));
+test('accepts a nested relative path that stays under a capture root', () => {
+  const root = makeRepo();
+  assert.equal(resolveOutDir(root, 'visual/../visual/captures'), realpathSync(join(root, 'visual/captures')));
 });
 
-test('rejects the repo root itself and its parents', () => {
-  assert.throws(() => resolveOutDir(ROOT, '.'), /refusing to use --out/);
-  assert.throws(() => resolveOutDir(ROOT, '..'), /refusing to use --out/);
-  assert.throws(() => resolveOutDir(ROOT, '../..'), /refusing to use --out/);
+test('rejects the bare visual/ root (must target an owned subdir)', () => {
+  const root = makeRepo();
+  assert.throws(() => resolveOutDir(root, 'visual'), /capture-owned output root/);
+  assert.throws(() => resolveOutDir(root, 'visual/'), /capture-owned output root/);
+  assert.throws(() => resolveOutDir(root, 'visual/..'), /capture-owned output root/);
 });
 
-test('rejects traversal that escapes the repo', () => {
-  assert.throws(() => resolveOutDir(ROOT, '../sibling'), /refusing to use --out/);
-  assert.throws(() => resolveOutDir(ROOT, '/etc'), /refusing to use --out/);
-  assert.throws(() => resolveOutDir(ROOT, '/tmp/captures'), /refusing to use --out/);
+test('rejects repo root, parents, and traversal outside the repo', () => {
+  const root = makeRepo();
+  assert.throws(() => resolveOutDir(root, '.'), /capture-owned output root/);
+  assert.throws(() => resolveOutDir(root, '..'), /capture-owned output root/);
+  assert.throws(() => resolveOutDir(root, '../sibling'), /capture-owned output root/);
+  assert.throws(() => resolveOutDir(root, '/etc'), /capture-owned output root/);
 });
 
-test('rejects harness-adjacent repo dirs that are NOT output areas (.git/src/scripts/dist)', () => {
-  // Containment-in-repo is insufficient: a typo must not let rm -rf wipe source,
-  // build output, or Git metadata.
-  assert.throws(() => resolveOutDir(ROOT, '.git'), /refusing to use --out/);
-  assert.throws(() => resolveOutDir(ROOT, 'src'), /refusing to use --out/);
-  assert.throws(() => resolveOutDir(ROOT, 'scripts'), /refusing to use --out/);
-  assert.throws(() => resolveOutDir(ROOT, 'dist'), /refusing to use --out/);
-  assert.throws(() => resolveOutDir(ROOT, 'node_modules'), /refusing to use --out/);
+test('rejects harness-adjacent dirs that are NOT capture roots (src/scripts/dist/.git/node_modules)', () => {
+  const root = makeRepo();
+  assert.throws(() => resolveOutDir(root, 'src'), /capture-owned output root/);
+  assert.throws(() => resolveOutDir(root, 'scripts'), /capture-owned output root/);
+  assert.throws(() => resolveOutDir(root, 'dist'), /capture-owned output root/);
+  assert.throws(() => resolveOutDir(root, '.git'), /capture-owned output root/);
+  assert.throws(() => resolveOutDir(root, 'node_modules'), /capture-owned output root/);
 });
 
-test('rejects a tracked file path even though it is inside the repo', () => {
-  // rm -rf on a file path would delete it; the guard must reject files outright.
-  assert.throws(() => resolveOutDir(ROOT, 'package.json'), /refusing to use --out/);
-  assert.throws(() => resolveOutDir(ROOT, 'visual/../package.json'), /refusing to use --out/);
+test('rejects tracked harness files inside visual/', () => {
+  const root = makeRepo();
+  // Files directly under visual/ are not under a capture-owned root, so the
+  // allowlist rejects them.
+  assert.throws(() => resolveOutDir(root, 'visual/compare.mjs'), /capture-owned output root/);
+  assert.throws(() => resolveOutDir(root, 'visual/README.md'), /capture-owned output root/);
+  // A tracked file that DOES sit under an owned root (manifest.json under
+  // visual/baselines/) passes the allowlist but is caught by the
+  // non-directory guard — rm -rf must never target an existing file.
+  assert.throws(() => resolveOutDir(root, 'visual/baselines/manifest.json'), /non-directory/);
+  // A tracked file outside visual/ is rejected by the allowlist.
+  assert.throws(() => resolveOutDir(root, 'package.json'), /capture-owned output root/);
 });
 
-test('rejects the bare visual/ root (must target a subdir, not the whole harness area)', () => {
-  assert.throws(() => resolveOutDir(ROOT, 'visual'), /refusing to use --out/);
-  assert.throws(() => resolveOutDir(ROOT, 'visual/'), /refusing to use --out/);
-  assert.throws(() => resolveOutDir(ROOT, 'visual/..'), /refusing to use --out/);
+test('rejects a symlinked ancestor that escapes the capture root', () => {
+  const root = makeRepo();
+  const outside = mkdtempSync(join(tmpdir(), 'vc-out-escape-'));
+  // visual/captures/evil -> /tmp/outside: an in-repo symlink pointing out.
+  symlinkSync(outside, join(root, 'visual/captures/evil'), 'dir');
+  assert.throws(() => resolveOutDir(root, 'visual/captures/evil'), /capture-owned output root/);
 });
