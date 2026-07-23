@@ -525,6 +525,12 @@ test('legacy v2 flat options fail everywhere with an actionable migration messag
   }
 });
 
+// Every effect's default descriptor (classic/fullscreen/desktop) must render a
+// stable, frozen signature. Nine of the ten are still byte-identical to the v2
+// baseline; starfield was normalized in #7 (aspect-correct projection, viewport
+// visibility culling, density budgets), so its signature moved off the v2 value
+// and is now pinned to the normalized composition below. The starfield-specific
+// suite (tests/starfield.test.js) covers the normalized behavior in depth.
 test('classic default frames remain pixel-stable and unchanged from the v2 baseline', async () => {
   const snapshots = {};
   for (const [name, , , filename] of EFFECTS) {
@@ -533,7 +539,7 @@ test('classic default frames remain pixel-stable and unchanged from the v2 basel
   assert.deepEqual(snapshots, {
     plasma: 'pixels:19981681',
     fire: 'pixels:a5da6421',
-    starfield: 'vector:1bd6eae4',
+    starfield: 'vector:95857935',
     metaballs: 'pixels:b18e0d45',
     tunnel: 'pixels:ac04a300',
     mandelbrot: 'pixels:72d102ad',
