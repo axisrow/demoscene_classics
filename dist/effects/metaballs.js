@@ -486,9 +486,14 @@
     const { requested, presetName, overrides } = resolveSkin(name, input.skin, skins);
     const preset = skins[presetName] ?? {};
     const surfaceName = resolveSurface(name, input.surface, profiles.surfaces);
-    const surfaceProfile = profiles.surfaces[surfaceName] ?? {};
     const { requestedDevice, resolvedDevice } = resolveDevice(name, input.device, profiles.devices);
-    const deviceProfile = profiles.devices[resolvedDevice] ?? {};
+    const slotKey = `${surfaceName}.${resolvedDevice}`;
+    if (!profiles.slots || !Object.prototype.hasOwnProperty.call(profiles.slots, slotKey)) {
+      throw new RangeError(
+        `${name}: profile slot '${slotKey}' is missing. Every effect must define all four slots: fullscreen.desktop, fullscreen.mobile, preview.desktop, preview.mobile.`
+      );
+    }
+    const profileOverlay = profiles.slots[slotKey];
     const explicit = input.config ?? {};
     if (!isPlainObject(explicit)) {
       throw new TypeError(`${name}.config must be an object.`);
@@ -501,8 +506,7 @@
     let config = cloneValue(configDefaults);
     config = mergeValue(config, preset);
     config = mergeValue(config, overrides);
-    config = mergeValue(config, surfaceProfile);
-    config = mergeValue(config, deviceProfile);
+    config = mergeValue(config, profileOverlay);
     config = mergeValue(config, explicit);
     validateCommonConfig(name, config);
     validate(config);
@@ -723,16 +727,64 @@
     classic: Object.freeze({})
   });
 
+  // src/effects/profiles.js
+  var SURFACES = ["fullscreen", "preview"];
+  var DEVICES = ["desktop", "mobile"];
+  var SLOT_KEYS = ["fullscreen.desktop", "fullscreen.mobile", "preview.desktop", "preview.mobile"];
+  function buildProfiles(slots) {
+    if (!slots || typeof slots !== "object") {
+      throw new TypeError("buildProfiles expects a slots object.");
+    }
+    for (const key of SLOT_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(slots, key)) {
+        throw new RangeError(`Profile slot '${key}' is missing; every effect must define all four slots.`);
+      }
+      if (!isPlainObject2(slots[key])) {
+        throw new RangeError(`Profile slot '${key}' must be a plain object.`);
+      }
+    }
+    for (const key of Object.keys(slots)) {
+      if (!SLOT_KEYS.includes(key)) {
+        throw new RangeError(`Unknown profile slot '${key}'. Expected one of: ${SLOT_KEYS.join(", ")}.`);
+      }
+    }
+    return Object.freeze({
+      slots: Object.freeze(cloneSlots(slots, freezeValue)),
+      surfaces: Object.freeze({
+        fullscreen: Object.freeze({}),
+        preview: Object.freeze({})
+      }),
+      devices: Object.freeze({
+        desktop: Object.freeze({}),
+        mobile: Object.freeze({})
+      })
+    });
+  }
+  function isPlainObject2(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+  function cloneSlots(slots, freezeValue2) {
+    const result = {};
+    for (const key of SLOT_KEYS) {
+      result[key] = freezeValue2(cloneValue(slots[key]));
+    }
+    return result;
+  }
+  var PROFILE_SURFACES = Object.freeze(SURFACES);
+  var PROFILE_DEVICES = Object.freeze(DEVICES);
+  var PROFILE_SLOT_KEYS = Object.freeze(SLOT_KEYS);
+
   // src/effects/metaballs/profiles.js
-  var METABALLS_PROFILES = Object.freeze({
-    surfaces: Object.freeze({
-      fullscreen: Object.freeze({}),
-      preview: Object.freeze({})
-    }),
-    devices: Object.freeze({
-      desktop: Object.freeze({}),
-      mobile: Object.freeze({})
-    })
+  var RUNTIME_FULLSCREEN_DESKTOP = { runtime: { maxFps: 60, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_FULLSCREEN_MOBILE = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_DESKTOP = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
+  var RUNTIME_PREVIEW_MOBILE = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
+  var PREVIEW_BUDGET = { render: { resolution: 0.2 }, field: { pointCount: 3 } };
+  var METABALLS_PROFILES = buildProfiles({
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP, ...PREVIEW_BUDGET },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE, ...PREVIEW_BUDGET }
   });
 
   // src/effects/metaballs/index.js

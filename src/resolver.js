@@ -124,8 +124,11 @@ function assertSkinPaths(name, label, overlay, allow) {
  * Resolve an API v3 descriptor against an effect definition.
  *
  * Merge order (exact): effect defaults -> skin preset -> skin overrides
- * -> surface profile -> device profile -> explicit config. The result is
- * deeply frozen; neither caller input nor exported presets are mutated.
+ * -> matched (surface × resolved-device) profile slot -> explicit config. The
+ * matched slot is the four-slot profile layer from #3 (it composes the surface
+ * and device axes into one overlay so per-(surface,device) budgets such as
+ * maxFps are representable). The result is deeply frozen; neither caller input
+ * nor exported presets are mutated.
  *
  * @param {object} definition - effect definition (name, configDefaults, validate, skins, profiles, capabilities).
  * @param {object} [descriptor] - { skin, surface, device, config }.
@@ -148,10 +151,30 @@ export function resolveDescriptor(definition, descriptor) {
   const preset = skins[presetName] ?? {};
 
   const surfaceName = resolveSurface(name, input.surface, profiles.surfaces);
-  const surfaceProfile = profiles.surfaces[surfaceName] ?? {};
-
   const { requestedDevice, resolvedDevice } = resolveDevice(name, input.device, profiles.devices);
-  const deviceProfile = profiles.devices[resolvedDevice] ?? {};
+
+  // The profile overlay for the matched (surface × resolved-device) combination.
+  // Profiles are declared as four complete, effect-owned slots (#3). A slot may
+  // carry budgets that depend on BOTH axes at once (e.g. maxFps differs across
+  // preview/desktop vs fullscreen/desktop), which two independent surface and
+  // device overlays cannot express. We therefore apply the single composite
+  // matched slot rather than merging a surface overlay and a device overlay
+  // separately. Conceptually this is the same "surface profile → device profile"
+  // step from #2, but expressed as one composite overlay so per-(surface,device)
+  // budgets are representable.
+  const slotKey = `${surfaceName}.${resolvedDevice}`;
+  // Every effect must declare all four (surface × device) slots (#3): no
+  // implicit, undocumented fallbacks. If the matched slot is missing we fail
+  // loud rather than silently substituting an empty overlay, which would drop
+  // the effect's runtime budgets (maxFps/pixelRatio/pauseWhenHidden) and render
+  // resolution for this surface/device pair without any diagnostic.
+  if (!profiles.slots || !Object.prototype.hasOwnProperty.call(profiles.slots, slotKey)) {
+    throw new RangeError(
+      `${name}: profile slot '${slotKey}' is missing. Every effect must define all four slots: `
+      + 'fullscreen.desktop, fullscreen.mobile, preview.desktop, preview.mobile.'
+    );
+  }
+  const profileOverlay = profiles.slots[slotKey];
 
   const explicit = input.config ?? {};
   if (!isPlainObject(explicit)) {
@@ -173,8 +196,7 @@ export function resolveDescriptor(definition, descriptor) {
   let config = cloneValue(configDefaults);
   config = mergeValue(config, preset);
   config = mergeValue(config, overrides);
-  config = mergeValue(config, surfaceProfile);
-  config = mergeValue(config, deviceProfile);
+  config = mergeValue(config, profileOverlay);
   config = mergeValue(config, explicit);
 
   validateCommonConfig(name, config);
