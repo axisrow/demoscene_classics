@@ -166,3 +166,29 @@ test('a foreground floor derived from a legitimately-empty baseline does not fal
   const result = comparePngBuffers(emptyCapture, emptyBaseline, { maxDiffPixelRatio: 0.15, minForegroundRatio: floor });
   assert.equal(result.match, true);
 });
+
+test('a fully-transparent capture fails even with byte-identical RGB', () => {
+  // Regression guard for an alpha-handling hole: a capture whose RGB matches
+  // the opaque baseline but whose alpha collapsed to 0 is visually blank. The
+  // comparator must count alpha as a channel so this fails the diff check, and
+  // the foreground floor must ignore transparent pixels so it also fails there.
+  const baseline = sparseForegroundPng(40, 30, [0, 0, 0], [255, 255, 255], 12);
+  const decoded = decodePng(baseline);
+  // Same RGB, alpha forced to 0 everywhere.
+  const transparentRgba = Buffer.from(decoded.rgba);
+  for (let i = 3; i < transparentRgba.length; i += 4) transparentRgba[i] = 0;
+  const transparent = encodePng({ width: 40, height: 30, rgba: transparentRgba });
+
+  // At default channelTolerance 0 the alpha channel differs everywhere.
+  const exact = comparePngBuffers(transparent, baseline, { maxDiffPixelRatio: 0 });
+  assert.equal(exact.match, false);
+  assert.equal(exact.diffPixelRatio, 1);
+
+  // Even under a permissive tolerance the foreground floor catches it: the
+  // transparent capture has ~0 VISIBLE foreground.
+  const baselineFg = foregroundRatio(decoded);
+  const floor = baselineFg * 0.5;
+  const permissive = comparePngBuffers(transparent, baseline, { maxDiffPixelRatio: 0.15, minForegroundRatio: floor });
+  assert.equal(permissive.foregroundActual, 0);
+  assert.equal(permissive.match, false);
+});
