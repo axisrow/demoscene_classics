@@ -16,6 +16,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildMatrix, parseCaptureFilename } from '../visual/matrix.mjs';
 import { PINNED_CHROMIUM_BUILD, PINNED_PLAYWRIGHT_VERSION } from '../visual/pin.mjs';
+import { resolveOutDir } from '../visual/outpath.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const runnerPath = join(root, 'visual', 'capture_runner.py');
@@ -115,12 +116,26 @@ async function main() {
   await checkPlaywright();
 
   let { captures } = buildMatrix();
+  const isSubset = Boolean(args.effect || args.profile);
   if (args.effect) captures = captures.filter((c) => c.effectName === args.effect);
   if (args.profile) captures = captures.filter((c) => c.profileId === args.profile);
 
-  const outDir = join(root, args.out);
-  await rm(outDir, { recursive: true, force: true });
-  await mkdir(outDir, { recursive: true });
+  const outDir = resolveOutDir(root, args.out);
+
+  if (isSubset) {
+    // A subset run (--effect/--profile) must NOT wipe the whole output dir: that
+    // would destroy unrelated captures/baselines and write only the filtered
+    // few. Remove only the files this run is about to replace, then reuse the
+    // existing directory. (A subset run therefore only ever edits its own
+    // slice of an existing matrix.)
+    await mkdir(outDir, { recursive: true });
+    await Promise.all(captures.map((c) => rm(join(outDir, c.filename), { force: true })));
+  } else {
+    // A full run replaces the complete matrix atomically-ish: clear the dir,
+    // then rewrite all 120 captures.
+    await rm(outDir, { recursive: true, force: true });
+    await mkdir(outDir, { recursive: true });
+  }
 
   const runnerCaptures = captures.map((c) => ({
     effectName: c.effectName,

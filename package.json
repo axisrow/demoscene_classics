@@ -10,7 +10,7 @@
     "benchmark:mandelbrot": "node scripts/benchmark-mandelbrot.mjs",
     "test": "npm run build && node --test",
     "check": "npm test",
-    "test:visual:unit": "node --test tests/visual-matrix.test.js tests/visual-pixel.test.js tests/webgl-smoke.test.js",
+    "test:visual:unit": "node --test tests/visual-matrix.test.js tests/visual-pixel.test.js tests/visual-outpath.test.js tests/webgl-smoke.test.js",
     "test:visual": "npm run build && node scripts/visual-capture.mjs --out visual/captures && node scripts/visual-compare.mjs",
     "visual:update": "npm run build && node scripts/visual-capture.mjs --out visual/baselines && node scripts/visual-contact-sheet.mjs --source visual/baselines",
     "visual:contact-sheet": "node scripts/visual-contact-sheet.mjs"

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { comparePngBuffers, buildDiffImage } from '../visual/compare.mjs';
+import { comparePngBuffers, buildDiffImage, foregroundRatio } from '../visual/compare.mjs';
 import { decodePng, encodePng } from '../visual/png.mjs';
 
 // Self-contained pixel-comparison tests. These exercise the bounded-tolerance
@@ -105,4 +105,64 @@ test('png encode/decode round-trips arbitrary pixel data', () => {
   const decoded = decodePng(original);
   const reencoded = encodePng({ width: 33, height: 17, rgba: decoded.rgba });
   assert.deepEqual(decodePng(reencoded).rgba, decoded.rgba);
+});
+
+// A sparse-foreground image (stars on black): most pixels are the background
+// colour, only a few are foreground. Used to exercise the blank guard.
+function sparseForegroundPng(width, height, bg, fg, starCount) {
+  const rgba = Buffer.alloc(width * height * 4);
+  for (let i = 0; i < rgba.length; i += 4) {
+    rgba[i] = bg[0]; rgba[i + 1] = bg[1]; rgba[i + 2] = bg[2]; rgba[i + 3] = 255;
+  }
+  // Deterministic star placement (no Math.random — tests must be reproducible).
+  for (let s = 0; s < starCount; s++) {
+    const x = (s * 97) % width;
+    const y = (s * 61) % height;
+    const i = (y * width + x) * 4;
+    rgba[i] = fg[0]; rgba[i + 1] = fg[1]; rgba[i + 2] = fg[2];
+  }
+  return encodePng({ width, height, rgba });
+}
+
+test('foreground ratio is ~0 for a solid image and >0 for a sparse one', () => {
+  const solid = decodePng(solidPng(40, 30, [0, 0, 0]));
+  const sparse = decodePng(sparseForegroundPng(40, 30, [0, 0, 0], [255, 255, 255], 12));
+  assert.equal(foregroundRatio(solid), 0);
+  assert.ok(foregroundRatio(sparse) > 0);
+  assert.ok(foregroundRatio(sparse) < 0.05, '12 stars on 1200px is well under 5%');
+});
+
+test('a blank capture fails the foreground floor even when its diff ratio is tiny', () => {
+  // Baseline: 12 bright stars on a black canvas (~1% foreground). Blank capture:
+  // an opaque all-black canvas. Their diff-pixel ratio is ~1% (only the stars
+  // differ), which passes a permissive 15% vector tolerance — but the blank
+  // capture has ~0 foreground, so a baseline-derived foreground floor must fail
+  // it. This is the regression a pure diff-ratio check would green-light.
+  const baseline = sparseForegroundPng(40, 30, [0, 0, 0], [255, 255, 255], 12);
+  const blank = solidPng(40, 30, [0, 0, 0]);
+  const baselineForeground = foregroundRatio(decodePng(baseline));
+  assert.ok(baselineForeground > 0, 'baseline must have intended foreground');
+  const floor = Math.max(0.0001, baselineForeground * 0.5);
+
+  // Same diff a permissive tolerance would accept...
+  const permissive = comparePngBuffers(blank, baseline, { maxDiffPixelRatio: 0.15 });
+  assert.equal(permissive.match, true, 'precondition: blank passes the diff tolerance alone');
+  // ...but the foreground floor catches the empty render.
+  const guarded = comparePngBuffers(blank, baseline, { maxDiffPixelRatio: 0.15, minForegroundRatio: floor });
+  assert.equal(guarded.match, false);
+  assert.ok(guarded.foregroundActual < floor);
+});
+
+test('a foreground floor derived from a legitimately-empty baseline does not false-fail', () => {
+  // A baseline that is itself intentionally empty at t=0 (e.g. starfield before
+  // any stars appear) has ~0 foreground. Its derived floor collapses to 0, so an
+  // equally-empty capture must still match — the guard must not invent content
+  // the baseline never had. This mirrors how visual-compare.mjs derives the
+  // floor (0 when baseline foreground is below the meaningful threshold).
+  const emptyBaseline = solidPng(40, 30, [5, 5, 10]);
+  const emptyCapture = solidPng(40, 30, [5, 5, 10]);
+  assert.ok(foregroundRatio(decodePng(emptyBaseline)) < 0.0001);
+  const floor = 0; // derived floor for a sub-threshold baseline
+  const result = comparePngBuffers(emptyCapture, emptyBaseline, { maxDiffPixelRatio: 0.15, minForegroundRatio: floor });
+  assert.equal(result.match, true);
 });

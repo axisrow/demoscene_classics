@@ -14,8 +14,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildMatrix, EXPECTED_CAPTURE_COUNT, parseCaptureFilename } from '../visual/matrix.mjs';
 import { VISUAL_DIRS, toleranceFor } from '../visual/pin.mjs';
-import { comparePngBuffers, buildDiffImage, readPng } from '../visual/compare.mjs';
-import { encodePng } from '../visual/png.mjs';
+import { comparePngBuffers, buildDiffImage, foregroundRatio, readPng } from '../visual/compare.mjs';
+import { decodePng, encodePng } from '../visual/png.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -80,6 +80,26 @@ async function main() {
   }
 
   // 4. Pixel comparison for every expected baseline that exists on both sides.
+  //
+  // Each comparison carries two independent guards:
+  //  - diff-pixel-ratio <= tolerance: the bounded rasterisation tolerance
+  //    (0 for pixel-buffer effects, 15% for vector effects).
+  //  - foreground floor: the capture must keep at least a baseline-derived
+  //    fraction of foreground (non-background) pixels. This is the semantic
+  //    blank guard — a capture whose effect rendered nothing collapses to ~0
+  //    foreground and fails here even when its diff ratio is tiny. Sparse
+  //    vector effects (starfield) have intended content on only a small
+  //    fraction of the frame, so a pure diff-ratio check can green-light a
+  //    fully blank render.
+  //
+  // The floor is HALF the baseline's own foreground ratio, but only when the
+  // baseline itself carries meaningful content. A baseline that is intentionally
+  // empty at t=0 (starfield/feedback before any motion) has ~0 foreground, so its
+  // floor is 0 — the guard must not invent content the baseline never had. This
+  // is why the floor is derived per-case from the committed baseline rather than
+  // set as a flat constant: only frames that are supposed to show something are
+  // required to show something.
+  const MEANINGFUL_BASELINE_FOREGROUND = 0.0001; // below this the baseline is "empty"
   const comparison = [];
   for (const filename of [...expectedFilenames].sort()) {
     if (!captureSet.has(filename) || !baselineSet.has(filename)) continue;
@@ -87,8 +107,15 @@ async function main() {
     const actual = readPng(join(capturesDir, filename));
     const expected = readPng(join(baselinesDir, filename));
     const tolerance = toleranceFor(parsed.effectName);
-    const result = comparePngBuffers(actual, expected, { maxDiffPixelRatio: tolerance });
-    comparison.push({ filename, tolerance, ...result });
+    const baselineForeground = foregroundRatio(decodePng(expected));
+    const foregroundFloor = baselineForeground >= MEANINGFUL_BASELINE_FOREGROUND
+      ? baselineForeground * 0.5
+      : 0;
+    const result = comparePngBuffers(actual, expected, {
+      maxDiffPixelRatio: tolerance,
+      minForegroundRatio: foregroundFloor
+    });
+    comparison.push({ filename, tolerance, foregroundFloor, ...result });
     if (!result.match) {
       const diff = buildDiffImage(actual, expected);
       await writeFile(join(diffsDir, filename), encodePng(diff));
@@ -99,10 +126,18 @@ async function main() {
   for (const c of failed) {
     if (c.dimensionMismatch) {
       errors.push(`dimension mismatch in ${c.filename}: actual ${c.actual.width}x${c.actual.height} vs expected ${c.expected.width}x${c.expected.height}`);
-    } else {
+    } else if (c.diffPixelRatio > c.tolerance) {
       errors.push(
         `${c.filename}: diff ${c.diffPixels}/${c.totalPixels} pixels `
         + `(${(c.diffPixelRatio * 100).toFixed(3)}% > ${(c.tolerance * 100).toFixed(3)}% tolerance)`
+      );
+    } else {
+      // diff ratio is within tolerance but the foreground floor was breached:
+      // the capture rendered too little content (a blank/empty effect).
+      errors.push(
+        `${c.filename}: blank/empty capture — foreground ${(c.foregroundActual * 100).toFixed(4)}% `
+        + `< floor ${(c.foregroundFloor * 100).toFixed(4)}% (diff ratio `
+        + `${(c.diffPixelRatio * 100).toFixed(3)}% was within tolerance)`
       );
     }
   }
