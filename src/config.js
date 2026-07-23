@@ -1,8 +1,8 @@
-function isPlainObject(value) {
+export function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function cloneValue(value) {
+export function cloneValue(value) {
   if (Array.isArray(value)) return value.map(cloneValue);
   if (isPlainObject(value)) {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneValue(item)]));
@@ -10,13 +10,26 @@ function cloneValue(value) {
   return value;
 }
 
-function freezeValue(value) {
+export function freezeValue(value) {
   if (Array.isArray(value)) value.forEach(freezeValue);
   else if (isPlainObject(value)) Object.values(value).forEach(freezeValue);
   return value !== null && typeof value === 'object' ? Object.freeze(value) : value;
 }
 
-function assertKnownKeys(effectName, input, defaults, path = effectName) {
+export function mergeValue(defaultValue, inputValue) {
+  if (inputValue === undefined) return cloneValue(defaultValue);
+  if (isPlainObject(defaultValue) && isPlainObject(inputValue)) {
+    const result = {};
+    const keys = new Set([...Object.keys(defaultValue), ...Object.keys(inputValue)]);
+    for (const key of keys) {
+      result[key] = mergeValue(defaultValue[key], inputValue[key]);
+    }
+    return result;
+  }
+  return cloneValue(inputValue);
+}
+
+export function assertKnownKeys(effectName, input, defaults, path = effectName) {
   if (!isPlainObject(input)) throw new TypeError(`${path} must be an object.`);
   for (const [key, value] of Object.entries(input)) {
     if (!(key in defaults)) throw new RangeError(`Unknown option: ${path}.${key}`);
@@ -32,19 +45,6 @@ function assertKnownKeys(effectName, input, defaults, path = effectName) {
       ));
     }
   }
-}
-
-function mergeValue(defaultValue, inputValue) {
-  if (inputValue === undefined) return cloneValue(defaultValue);
-  if (isPlainObject(defaultValue) && isPlainObject(inputValue)) {
-    const result = {};
-    const keys = new Set([...Object.keys(defaultValue), ...Object.keys(inputValue)]);
-    for (const key of keys) {
-      result[key] = mergeValue(defaultValue[key], inputValue[key]);
-    }
-    return result;
-  }
-  return cloneValue(inputValue);
 }
 
 export function assertNumber(value, path, { min = -Infinity, max = Infinity, integer = false } = {}) {

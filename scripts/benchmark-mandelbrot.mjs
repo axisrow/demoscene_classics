@@ -1,7 +1,8 @@
 import { performance } from 'node:perf_hooks';
 
-import { normalizeMandelbrotConfig } from '../src/effects/mandelbrot.js';
-import { renderMandelbrotPixels } from '../src/effects/mandelbrot-core.js';
+import { mandelbrotDefinition } from '../src/effects/mandelbrot/index.js';
+import { resolveDescriptor } from '../src/resolver.js';
+import { renderMandelbrotPixels } from '../src/effects/mandelbrot/mandelbrot-core.js';
 import { buildGradientPalette, packHexColor } from '../src/effects/utils.js';
 
 const cssWidth = 1456;
@@ -11,7 +12,9 @@ const maxIterations = process.env.DEMO_MAX_ITERATIONS
   ? Number(process.env.DEMO_MAX_ITERATIONS)
   : 140;
 
-const skin = {
+// Base configuration passed through the v3 explicit-config escape hatch.
+// Camera/algorithm are algorithmic identity and must live under `config`.
+const baseConfig = {
   runtime: { autoStart: false, pauseWhenHidden: false },
   render: { smoothing: true },
   motion: { speed: 1, cycleSeconds: 20, startPhase: 0.25 },
@@ -30,11 +33,19 @@ const skin = {
   algorithm: { maxIterations }
 };
 
+function mergeDeep(target, source) {
+  const out = { ...target };
+  for (const [key, value] of Object.entries(source)) {
+    out[key] = value && typeof value === 'object' && !Array.isArray(value)
+      ? mergeDeep(target[key] ?? {}, value)
+      : value;
+  }
+  return out;
+}
+
 function measure(name, runtime, render) {
-  const config = normalizeMandelbrotConfig({
-    ...skin,
-    runtime: { ...skin.runtime, ...runtime },
-    render: { ...skin.render, ...render }
+  const { config } = resolveDescriptor(mandelbrotDefinition, {
+    config: mergeDeep(baseConfig, { runtime, render })
   });
   const width = Math.floor(cssWidth * config.runtime.pixelRatio * config.render.resolution);
   const height = Math.floor(cssHeight * config.runtime.pixelRatio * config.render.resolution);
@@ -76,7 +87,7 @@ const legacy = measure(
   { resolution: 0.5 }
 );
 const portfolio = measure(
-  'api-v2-portfolio-skin',
+  'api-v3-portfolio-skin',
   { maxFps: 24, pixelRatio: 1 },
   { resolution: portfolioResolution }
 );

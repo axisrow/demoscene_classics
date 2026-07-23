@@ -63,7 +63,10 @@ for (const [index, effect] of EFFECTS.entries()) {
       <div class="run">▶ RUN ▸</div>
     </div>`;
   grid.appendChild(card);
-  Demoscene[effect.api](card.querySelector('canvas'), PREVIEW_SKINS[effect.api]);
+  Demoscene[effect.api](card.querySelector('canvas'), {
+    surface: 'preview',
+    config: PREVIEW_SKINS[effect.api]
+  });
 }
 </script>
 </body>

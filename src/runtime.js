@@ -1,4 +1,4 @@
-import { cloneConfig } from './config.js';
+import { cloneConfig, freezeValue } from './config.js';
 
 const RUNTIME_KEY = Symbol.for('demoscene-classics.runtime');
 const MAX_DELTA_SECONDS = 0.05;
@@ -96,7 +96,8 @@ function getScheduler() {
 
 /**
  * @typedef {{ runtime: { autoStart: boolean, maxFps: number, pixelRatio: number, pauseWhenHidden: boolean } }} EffectConfig
- * @typedef {{ start(): EffectController, stop(): EffectController, resize(): EffectController, renderOnce(timeSeconds?: number): EffectController, getConfig(): EffectConfig, getStats(): object, destroy(): void }} EffectController
+ * @typedef {{ requestedSkin: (string|object), preset: string, surface: string, requestedDevice: string, resolvedDevice: string }} EffectSelection
+ * @typedef {{ start(): EffectController, stop(): EffectController, resize(): EffectController, renderOnce(timeSeconds?: number): EffectController, getConfig(): EffectConfig, getSelection(): (EffectSelection|null), getStats(): object, destroy(): void }} EffectController
  */
 
 /**
@@ -104,9 +105,10 @@ function getScheduler() {
  * @param {string | HTMLCanvasElement} target
  * @param {(context: {canvas: HTMLCanvasElement, config: EffectConfig}) => object} rendererFactory
  * @param {EffectConfig} config
+ * @param {object} [selection] - the resolved API v3 selection snapshot (returned by getSelection()).
  * @returns {EffectController}
  */
-export function mountEffect(target, rendererFactory, config) {
+export function mountEffect(target, rendererFactory, config, selection = null) {
   const canvas = resolveCanvas(target);
   const { autoStart, maxFps, pixelRatio, pauseWhenHidden } = config.runtime;
   const minimumFrameInterval = maxFps === Infinity ? 0 : 1000 / maxFps;
@@ -195,7 +197,13 @@ export function mountEffect(target, rendererFactory, config) {
       return controller;
     },
     getConfig() {
-      return cloneConfig(config);
+      // Return a fresh, deeply frozen clone so callers receive the fully
+      // resolved v3 configuration (frozen per the API contract) without ever
+      // holding a reference to the live internal config object.
+      return freezeValue(cloneConfig(config));
+    },
+    getSelection() {
+      return selection;
     },
     getStats() {
       return {

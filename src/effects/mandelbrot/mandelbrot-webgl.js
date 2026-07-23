@@ -1,5 +1,5 @@
 import { mandelbrotZoom } from './mandelbrot-core.js';
-import { buildGradientPalette, packHexColor } from './utils.js';
+import { buildGradientPalette, packHexColor } from '../utils.js';
 
 const VERTEX_SHADER = `#version 300 es
 const vec2 POSITIONS[3] = vec2[3](

@@ -15,6 +15,18 @@
     else if (isPlainObject(value)) Object.values(value).forEach(freezeValue);
     return value !== null && typeof value === "object" ? Object.freeze(value) : value;
   }
+  function mergeValue(defaultValue, inputValue) {
+    if (inputValue === void 0) return cloneValue(defaultValue);
+    if (isPlainObject(defaultValue) && isPlainObject(inputValue)) {
+      const result = {};
+      const keys = /* @__PURE__ */ new Set([...Object.keys(defaultValue), ...Object.keys(inputValue)]);
+      for (const key of keys) {
+        result[key] = mergeValue(defaultValue[key], inputValue[key]);
+      }
+      return result;
+    }
+    return cloneValue(inputValue);
+  }
   function assertKnownKeys(effectName, input, defaults, path = effectName) {
     if (!isPlainObject(input)) throw new TypeError(`${path} must be an object.`);
     for (const [key, value] of Object.entries(input)) {
@@ -31,18 +43,6 @@
         ));
       }
     }
-  }
-  function mergeValue(defaultValue, inputValue) {
-    if (inputValue === void 0) return cloneValue(defaultValue);
-    if (isPlainObject(defaultValue) && isPlainObject(inputValue)) {
-      const result = {};
-      const keys = /* @__PURE__ */ new Set([...Object.keys(defaultValue), ...Object.keys(inputValue)]);
-      for (const key of keys) {
-        result[key] = mergeValue(defaultValue[key], inputValue[key]);
-      }
-      return result;
-    }
-    return cloneValue(inputValue);
   }
   function assertNumber(value, path, { min = -Infinity, max = Infinity, integer = false } = {}) {
     if (!Number.isFinite(value) || value < min || value > max || integer && !Number.isInteger(value)) {
@@ -85,15 +85,6 @@
     assertNumber(motion.speed, `${effectName}.motion.speed`, { min: Number.MIN_VALUE });
     assertPalette(appearance.palette, `${effectName}.appearance.palette`, appearance.colorCount);
     assertString(appearance.backgroundColor, `${effectName}.appearance.backgroundColor`);
-  }
-  function normalizeEffectConfig(effectName, input, defaults, validate = () => {
-  }) {
-    const supplied = input === void 0 ? {} : input;
-    assertKnownKeys(effectName, supplied, defaults);
-    const config = mergeValue(defaults, supplied);
-    validateCommonConfig(effectName, config);
-    validate(config);
-    return freezeValue(config);
   }
   function cloneConfig(config) {
     return cloneValue(config);
@@ -201,7 +192,7 @@
     }
     return globalThis[RUNTIME_KEY];
   }
-  function mountEffect(target, rendererFactory, config) {
+  function mountEffect(target, rendererFactory, config, selection = null) {
     const canvas = resolveCanvas(target);
     const { autoStart, maxFps, pixelRatio, pauseWhenHidden } = config.runtime;
     const minimumFrameInterval = maxFps === Infinity ? 0 : 1e3 / maxFps;
@@ -285,7 +276,10 @@
         return controller;
       },
       getConfig() {
-        return cloneConfig(config);
+        return freezeValue(cloneConfig(config));
+      },
+      getSelection() {
+        return selection;
       },
       getStats() {
         return {
@@ -371,12 +365,165 @@
     return controller;
   }
 
+  // src/resolver.js
+  var DESCRIPTOR_KEYS = /* @__PURE__ */ new Set(["skin", "surface", "device", "config"]);
+  var V2_GROUPS = /* @__PURE__ */ new Set([
+    "runtime",
+    "render",
+    "motion",
+    "appearance",
+    "field",
+    "simulation",
+    "particles",
+    "geometry",
+    "camera",
+    "algorithm",
+    "texture",
+    "feedback",
+    "bars",
+    "shading",
+    "text",
+    "wave",
+    "stars"
+  ]);
+  var VALID_DEVICES = ["auto", "desktop", "mobile"];
+  function detectLegacy(name, input) {
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError(`${name}: descriptor must be an object.`);
+    }
+    for (const key of Object.keys(input)) {
+      if (V2_GROUPS.has(key)) {
+        throw new TypeError(
+          `${name}: the legacy v2 flat options object is no longer supported in API v3. Move '${key}' under the config escape hatch, e.g. Demoscene.${name}(canvas, { skin: 'classic', surface: 'fullscreen', device: 'auto', config: { ${key}: ... } }). See the API v3 migration guide.`
+        );
+      }
+      if (!DESCRIPTOR_KEYS.has(key)) {
+        throw new RangeError(`Unknown descriptor field: ${name}.${key}`);
+      }
+    }
+  }
+  function resolveSkin(name, skinField, skins) {
+    if (skinField === void 0 || skinField === null) {
+      return { requested: "classic", presetName: "classic", overrides: {} };
+    }
+    if (typeof skinField === "string") {
+      if (!(skinField in skins)) {
+        throw new RangeError(`${name}: unknown skin '${skinField}'. Known skins: ${Object.keys(skins).join(", ")}.`);
+      }
+      return { requested: skinField, presetName: skinField, overrides: {} };
+    }
+    if (isPlainObject(skinField)) {
+      for (const key of Object.keys(skinField)) {
+        if (key !== "preset" && key !== "overrides") {
+          throw new RangeError(`Unknown skin field: ${name}.skin.${key} (use 'preset' and/or 'overrides').`);
+        }
+      }
+      const presetName = skinField.preset ?? "classic";
+      if (typeof presetName !== "string" || !(presetName in skins)) {
+        throw new RangeError(`${name}: unknown skin preset '${String(presetName)}'. Known skins: ${Object.keys(skins).join(", ")}.`);
+      }
+      const overrides = skinField.overrides ?? {};
+      if (!isPlainObject(overrides)) {
+        throw new TypeError(`${name}.skin.overrides must be an object.`);
+      }
+      return { requested: skinField, presetName, overrides };
+    }
+    throw new TypeError(`${name}.skin must be a string or { preset, overrides }.`);
+  }
+  function resolveSurface(name, surfaceField, surfaces) {
+    const surfaceName = surfaceField ?? "fullscreen";
+    if (typeof surfaceName !== "string" || !(surfaceName in surfaces)) {
+      throw new RangeError(`${name}: unknown surface '${String(surfaceName)}'. Known surfaces: ${Object.keys(surfaces).join(", ")}.`);
+    }
+    return surfaceName;
+  }
+  function detectDevice(requestedDevice) {
+    if (requestedDevice !== "auto") return requestedDevice;
+    const matchMedia = globalThis.matchMedia;
+    if (typeof matchMedia !== "function") return "desktop";
+    try {
+      const narrow = matchMedia("(max-width: 767px)");
+      const coarse = matchMedia("(hover: none) and (pointer: coarse)");
+      const isMobile = Boolean(narrow?.matches) || Boolean(coarse?.matches);
+      return isMobile ? "mobile" : "desktop";
+    } catch {
+      return "desktop";
+    }
+  }
+  function resolveDevice(name, deviceField, devices) {
+    const requestedDevice = deviceField ?? "auto";
+    if (!VALID_DEVICES.includes(requestedDevice)) {
+      throw new RangeError(`${name}: unknown device '${String(requestedDevice)}'. Known devices: ${VALID_DEVICES.join(", ")}.`);
+    }
+    const resolvedDevice = detectDevice(requestedDevice);
+    if (!(resolvedDevice in devices)) {
+      throw new RangeError(`${name}: unknown resolved device '${resolvedDevice}'.`);
+    }
+    return { requestedDevice, resolvedDevice };
+  }
+  function assertSkinPaths(name, label, overlay, allow) {
+    if (!isPlainObject(overlay)) return;
+    for (const key of Object.keys(overlay)) {
+      if (!allow.has(key)) {
+        throw new RangeError(
+          `${name}: skin ${label} is out of scope at '${key}'. Skins may only touch: ${[...allow].join(", ")}. To override an algorithmic field, pass it under 'config' instead.`
+        );
+      }
+    }
+  }
+  function resolveDescriptor(definition, descriptor) {
+    const {
+      name,
+      configDefaults,
+      validate = () => {
+      },
+      skins,
+      profiles,
+      capabilities
+    } = definition;
+    const input = descriptor === void 0 ? {} : descriptor;
+    detectLegacy(name, input);
+    const { requested, presetName, overrides } = resolveSkin(name, input.skin, skins);
+    const preset = skins[presetName] ?? {};
+    const surfaceName = resolveSurface(name, input.surface, profiles.surfaces);
+    const surfaceProfile = profiles.surfaces[surfaceName] ?? {};
+    const { requestedDevice, resolvedDevice } = resolveDevice(name, input.device, profiles.devices);
+    const deviceProfile = profiles.devices[resolvedDevice] ?? {};
+    const explicit = input.config ?? {};
+    if (!isPlainObject(explicit)) {
+      throw new TypeError(`${name}.config must be an object.`);
+    }
+    const allow = capabilities?.skinAllow ?? /* @__PURE__ */ new Set();
+    assertSkinPaths(name, `preset '${presetName}'`, preset, allow);
+    assertSkinPaths(name, "overrides", overrides, allow);
+    assertKnownKeys(name, explicit, configDefaults);
+    definition.validateInput?.(name, explicit);
+    let config = cloneValue(configDefaults);
+    config = mergeValue(config, preset);
+    config = mergeValue(config, overrides);
+    config = mergeValue(config, surfaceProfile);
+    config = mergeValue(config, deviceProfile);
+    config = mergeValue(config, explicit);
+    validateCommonConfig(name, config);
+    validate(config);
+    config = freezeValue(config);
+    const selection = Object.freeze({
+      requestedSkin: requested,
+      preset: presetName,
+      surface: surfaceName,
+      requestedDevice,
+      resolvedDevice
+    });
+    return { config, selection };
+  }
+
   // src/install.js
-  function installEffect(name, rendererFactory, normalizeConfig) {
+  function installEffect(definition) {
+    const { name } = definition;
     const namespace = globalThis.Demoscene && typeof globalThis.Demoscene === "object" ? globalThis.Demoscene : {};
-    namespace[name] = (target, options) => {
-      const config = normalizeConfig(options);
-      return mountEffect(target, rendererFactory, config);
+    namespace[name] = (target, descriptor) => {
+      const { config, selection } = resolveDescriptor(definition, descriptor);
+      return mountEffect(target, definition.rendererFactory, config, selection);
     };
     globalThis.Demoscene = namespace;
     return namespace[name];
@@ -454,63 +601,7 @@
   }
   var SINE_PHASE_OFFSETS = [0, 2 * Math.PI / 3, 4 * Math.PI / 3];
 
-  // src/effects/rotozoom.js
-  var ROTOZOOM_DEFAULTS = createEffectDefaults({
-    render: { resolution: 0.5, smoothing: true },
-    motion: {
-      speed: 1,
-      rotationSpeed: 0.8,
-      zoomBase: 1.2,
-      zoomAmplitude: 0.7,
-      zoomSpeed: 0.5
-    },
-    appearance: {
-      palette: ["#141e28", "#284d68", "#d47832", "#f0b050", "#00f0c8", "#000000"],
-      colorCount: 256,
-      backgroundColor: "#000000"
-    },
-    texture: {
-      size: 256,
-      checkerSize: 32,
-      ringFrequency: 0.12,
-      spokeCount: 8,
-      centerRadius: 26,
-      borderRadius: 30
-    }
-  });
-  function normalizeRotozoomConfig(input) {
-    return normalizeEffectConfig("rotozoom", input, ROTOZOOM_DEFAULTS, (config) => {
-      for (const key of ["rotationSpeed", "zoomAmplitude", "zoomSpeed"]) {
-        assertNumber(config.motion[key], `rotozoom.motion.${key}`);
-      }
-      assertNumber(config.motion.zoomBase, "rotozoom.motion.zoomBase", { min: Number.MIN_VALUE });
-      assertNumber(config.texture.size, "rotozoom.texture.size", { min: 16, max: 1024, integer: true });
-      assertNumber(config.texture.checkerSize, "rotozoom.texture.checkerSize", { min: 1, max: 512, integer: true });
-      assertNumber(config.texture.ringFrequency, "rotozoom.texture.ringFrequency", { min: 0 });
-      assertNumber(config.texture.spokeCount, "rotozoom.texture.spokeCount", { min: 1, max: 64, integer: true });
-      assertNumber(config.texture.centerRadius, "rotozoom.texture.centerRadius", { min: 0 });
-      assertNumber(config.texture.borderRadius, "rotozoom.texture.borderRadius", { min: config.texture.centerRadius });
-    });
-  }
-  function buildTexture(config, palette) {
-    const size = config.texture.size;
-    const texture = new Uint32Array(size * size);
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const checker = (Math.floor(x / config.texture.checkerSize) + Math.floor(y / config.texture.checkerSize) & 1) === 0;
-        const centerX = x - size / 2;
-        const centerY = y - size / 2;
-        const radius = Math.sqrt(centerX * centerX + centerY * centerY);
-        const rings = Math.sin(radius * config.texture.ringFrequency) * 0.5 + 0.5;
-        const spokes = Math.sin(Math.atan2(centerY, centerX) * config.texture.spokeCount) * 0.5 + 0.5;
-        let position = checker ? rings * 0.4 : 0.4 + spokes * 0.4;
-        if (radius < config.texture.centerRadius) position = 0.85;
-        else if (radius < config.texture.borderRadius) position = 1;
-        texture[y * size + x] = samplePackedPalette(palette, position);
-      }
-    }
-    return texture;
-  }
+  // src/effects/rotozoom/renderer.js
   function createRotozoomRenderer({ canvas, config }) {
     const context = getContext2D(canvas, { alpha: false });
     const buffer = createPixelBuffer();
@@ -558,7 +649,95 @@
       }
     };
   }
+  function buildTexture(config, palette) {
+    const size = config.texture.size;
+    const texture = new Uint32Array(size * size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const checker = (Math.floor(x / config.texture.checkerSize) + Math.floor(y / config.texture.checkerSize) & 1) === 0;
+        const centerX = x - size / 2;
+        const centerY = y - size / 2;
+        const radius = Math.sqrt(centerX * centerX + centerY * centerY);
+        const rings = Math.sin(radius * config.texture.ringFrequency) * 0.5 + 0.5;
+        const spokes = Math.sin(Math.atan2(centerY, centerX) * config.texture.spokeCount) * 0.5 + 0.5;
+        let position = checker ? rings * 0.4 : 0.4 + spokes * 0.4;
+        if (radius < config.texture.centerRadius) position = 0.85;
+        else if (radius < config.texture.borderRadius) position = 1;
+        texture[y * size + x] = samplePackedPalette(palette, position);
+      }
+    }
+    return texture;
+  }
+
+  // src/effects/rotozoom/config.js
+  var ROTOZOOM_DEFAULTS = createEffectDefaults({
+    render: { resolution: 0.5, smoothing: true },
+    motion: {
+      speed: 1,
+      rotationSpeed: 0.8,
+      zoomBase: 1.2,
+      zoomAmplitude: 0.7,
+      zoomSpeed: 0.5
+    },
+    appearance: {
+      palette: ["#141e28", "#284d68", "#d47832", "#f0b050", "#00f0c8", "#000000"],
+      colorCount: 256,
+      backgroundColor: "#000000"
+    },
+    texture: {
+      size: 256,
+      checkerSize: 32,
+      ringFrequency: 0.12,
+      spokeCount: 8,
+      centerRadius: 26,
+      borderRadius: 30
+    }
+  });
+  function validateRotozoom(config) {
+    for (const key of ["rotationSpeed", "zoomAmplitude", "zoomSpeed"]) {
+      assertNumber(config.motion[key], `rotozoom.motion.${key}`);
+    }
+    assertNumber(config.motion.zoomBase, "rotozoom.motion.zoomBase", { min: Number.MIN_VALUE });
+    assertNumber(config.texture.size, "rotozoom.texture.size", { min: 16, max: 1024, integer: true });
+    assertNumber(config.texture.checkerSize, "rotozoom.texture.checkerSize", { min: 1, max: 512, integer: true });
+    assertNumber(config.texture.ringFrequency, "rotozoom.texture.ringFrequency", { min: 0 });
+    assertNumber(config.texture.spokeCount, "rotozoom.texture.spokeCount", { min: 1, max: 64, integer: true });
+    assertNumber(config.texture.centerRadius, "rotozoom.texture.centerRadius", { min: 0 });
+    assertNumber(config.texture.borderRadius, "rotozoom.texture.borderRadius", { min: config.texture.centerRadius });
+  }
+
+  // src/effects/rotozoom/skins.js
+  var ROTOZOOM_SKINS = Object.freeze({
+    classic: Object.freeze({})
+  });
+
+  // src/effects/rotozoom/profiles.js
+  var ROTOZOOM_PROFILES = Object.freeze({
+    surfaces: Object.freeze({
+      fullscreen: Object.freeze({}),
+      preview: Object.freeze({})
+    }),
+    devices: Object.freeze({
+      desktop: Object.freeze({}),
+      mobile: Object.freeze({})
+    })
+  });
+
+  // src/effects/rotozoom/index.js
+  var rotozoomDefinition = {
+    name: "rotozoom",
+    rendererFactory: createRotozoomRenderer,
+    configDefaults: ROTOZOOM_DEFAULTS,
+    validate: validateRotozoom,
+    skins: ROTOZOOM_SKINS,
+    profiles: ROTOZOOM_PROFILES,
+    capabilities: {
+      // Skins change presentation only. The procedural *texture* (checker, rings,
+      // spokes, radii) is algorithmic identity and must go through `config`.
+      skinAllow: /* @__PURE__ */ new Set(["runtime", "render", "motion", "appearance"])
+    }
+  };
 
   // browser-entry.js
-  installEffect("rotozoom", createRotozoomRenderer, normalizeRotozoomConfig);
+  installEffect(rotozoomDefinition);
 })();
