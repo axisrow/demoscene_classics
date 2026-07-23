@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-23T17:18:20.969Z",
+  "generatedAt": "2026-07-23T17:34:17.882Z",
   "playwrightVersion": "1.59.0",
   "chromiumBuild": "1217",
   "captureCount": 12,
@@ -138,8 +138,8 @@
       "resolvedDevice": "desktop",
       "timestampSeconds": 0,
       "file": "visual/baselines/mandelbrot__desktop-fullscreen__1280x720__desktop__0s.png",
-      "sha256": "949c79f670a5ce88f73aa3811a9b3443666f2f7acf2214aef02ec7f50b01b74e",
-      "size": 100721,
+      "sha256": "3e3c29eb6fd5451b04852e6718ce8ae1e7058b45fd4e5fce634d42373c6a9eee",
+      "size": 100646,
       "selection": {
         "requestedSkin": "classic",
         "preset": "classic",
@@ -159,8 +159,8 @@
       "resolvedDevice": "desktop",
       "timestampSeconds": 1.5,
       "file": "visual/baselines/mandelbrot__desktop-fullscreen__1280x720__desktop__1p5s.png",
-      "sha256": "bcb9c68767d3b9a006dc746c35ba813caac67163e9b7e5767f19af33b714a1b5",
-      "size": 100271,
+      "sha256": "80fc11ce9ee0e9cee3f771ed3dc9df57b7f0b285121430e46f75c0c1f8fb308f",
+      "size": 100398,
       "selection": {
         "requestedSkin": "classic",
         "preset": "classic",
@@ -180,8 +180,8 @@
       "resolvedDevice": "desktop",
       "timestampSeconds": 5,
       "file": "visual/baselines/mandelbrot__desktop-fullscreen__1280x720__desktop__5s.png",
-      "sha256": "f25be8eed211528524a07bea462893ff0eeb298f34ca47795847acdcb77c5447",
-      "size": 47113,
+      "sha256": "08efdc30d7b7a3118b3299283fb23d501f47a1730e06b475e2029e8b38996d92",
+      "size": 47107,
       "selection": {
         "requestedSkin": "classic",
         "preset": "classic",
@@ -243,8 +243,8 @@
       "resolvedDevice": "mobile",
       "timestampSeconds": 5,
       "file": "visual/baselines/mandelbrot__mobile-fullscreen__390x844__mobile__5s.png",
-      "sha256": "2be8b272b52ca0360f8e3d74c4f8fba9f77eae0d7b306ec3fffc7758b710f0a5",
-      "size": 28306,
+      "sha256": "3d52a2ee351d52baab95523d4d0641c9270a2748f72e0312e954232507a04f7b",
+      "size": 28314,
       "selection": {
         "requestedSkin": "classic",
         "preset": "classic",

@@ -1269,6 +1269,33 @@ test('mandelbrot Canvas2D and WebGL share the same guarded coloring formula and 
   }
 });
 
+test('mandelbrot Canvas2D classifies a point that escapes on the final iteration as escaped, matching WebGL', () => {
+  // Issue #10 parity requirement: a point whose magnitude crosses the escape
+  // radius on the very last iteration is an ESCAPED point, not interior. The
+  // WebGL shader sets `escaped = true` and applies continuous coloring; Canvas
+  // 2D must agree rather than treating `iteration === maxIterations` as a
+  // blanket interior signal. (maxIterations:1, escapeRadius:2, point (3,0):
+  // one step -> z=3, mag2=9 >= 4 -> escaped.)
+  const config = {
+    motion: { speed: 1, cycleSeconds: 28, startPhase: 0 },
+    camera: { centerX: 6, centerY: 0, minZoom: 1, maxZoom: 1 },
+    algorithm: { iterationBase: 80, iterationGrowth: 60, maxIterations: 1, escapeRadius: 2 },
+    appearance: {
+      palette: ['#000000', '#ffffff'], colorCount: 256, backgroundColor: '#000000',
+      interiorColor: '#000000', colorScale: 0.06, colorCurve: 1, colorOffset: 0, cycleSpeed: 0
+    }
+  };
+  // centerX=6 with zoom=1 => span=3 => realStart = 6-3 = 3, so the lone pixel
+  // (x=0) samples real=3 (the escape fixture). imag lands near 0.
+  const pixels = new Uint32Array(1);
+  const palette = buildGradientPalette(new Uint32Array(256), config.appearance.palette);
+  const interiorColor = packHexColor(config.appearance.interiorColor) >>> 0;
+  renderMandelbrotPixels({ pixels, width: 1, height: 1, time: 0, config, palette, interiorColor });
+  // The point escaped (mag2=9 >= escapeSquared=4), so it must NOT be interior.
+  assert.notEqual(pixels[0] >>> 0, interiorColor,
+    'a point that escapes on the final iteration must be coloured, not painted interior');
+});
+
 test('mandelbrot portrait and landscape profile slots carry distinct cameras and resolution-independent bounds', () => {
   const slots = {
     'fullscreen.desktop': resolveDescriptor(mandelbrotDefinition, { surface: 'fullscreen', device: 'desktop' }).config,

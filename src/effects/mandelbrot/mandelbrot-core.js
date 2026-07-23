@@ -173,12 +173,18 @@ export function renderMandelbrotPixels({
         iteration++;
       }
 
-      if (iteration === maxIterations) {
+      // Interior iff the orbit never escaped — i.e. its magnitude is still
+      // below the escape radius after the iteration budget is spent. This
+      // matches the WebGL shader's `escaped` flag rather than treating
+      // `iteration === maxIterations` as a blanket interior signal: a point
+      // that crosses the escape radius ON the final iteration is escaped, not
+      // interior (issue #10 backend-parity requirement).
+      const mag2 = zRealSquared + zImaginarySquared;
+      if (mag2 < escapeSquared) {
         pixels[index++] = interiorColor;
         continue;
       }
 
-      const mag2 = zRealSquared + zImaginarySquared;
       pixels[index++] = palette[mandelbrotPaletteIndex({
         iteration,
         mag2,
