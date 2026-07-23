@@ -532,12 +532,13 @@ test('legacy v2 flat options fail everywhere with an actionable migration messag
 // Every effect's default descriptor (classic/fullscreen/desktop) must render a
 // stable, frozen signature. Eight of the ten are still byte-identical to the v2
 // baseline. Starfield was normalized in #7 (aspect-correct projection, viewport
-// visibility culling, density budgets) and tunnel was normalized in #9
+// visibility culling, density budgets), tunnel was normalized in #9
 // (aspect-correct normalized polar coordinates, guarded bounded-inverse depth,
-// meaningful fog), so each moved off its v2 value and is pinned to its
-// normalized composition below. The effect-specific suites
-// (tests/starfield.test.js, tests/tunnel.test.js) cover the normalized
-// behavior in depth.
+// meaningful fog), and copperBars was refined in #14 (copper palette, bounded
+// overlap composite, normalized portrait layout), so each moved off its v2
+// value and is pinned to its normalized composition below. The effect-specific
+// suites (tests/starfield.test.js, tests/tunnel.test.js,
+// tests/copper-bars.test.js) cover the normalized behavior in depth.
 test('classic default frames remain pixel-stable and unchanged from the v2 baseline', async () => {
   const snapshots = {};
   for (const [name, , , filename] of EFFECTS) {
@@ -553,7 +554,7 @@ test('classic default frames remain pixel-stable and unchanged from the v2 basel
     sineScroller: 'vector:1a8c3cf0',
     rotozoom: 'pixels:cb358dc5',
     feedback: 'vector:7e2ccd86',
-    copperBars: 'pixels:d6bbc495'
+    copperBars: 'pixels:7ac0c2b5'
   });
 });
 
@@ -861,7 +862,7 @@ test('explicit config changes the actual renderer for all ten effects', async ()
     sineScroller: { stars: { count: 12 } },
     rotozoom: { motion: { speed: 1.7 }, appearance: { palette: CUSTOM_PALETTE, colorCount: 17 } },
     feedback: { geometry: { sides: 8 } },
-    copperBars: { shading: { highlightStrength: 40 } }
+    copperBars: { shading: { barAlphaScale: 0.5 } }
   };
   for (const [name, , , filename] of EFFECTS) {
     const classic = await rendererSignature(name, filename);

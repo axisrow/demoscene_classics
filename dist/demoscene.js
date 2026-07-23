@@ -2836,6 +2836,9 @@ void main() {
       config.appearance.palette
     );
     const background = packHexColor(config.appearance.backgroundColor);
+    const bgR = background & 255;
+    const bgG = background >>> 8 & 255;
+    const bgB = background >>> 16 & 255;
     let width = 1;
     let height = 1;
     return {
@@ -2845,34 +2848,46 @@ void main() {
         resizePixelBuffer(buffer, width * config.render.resolution, height * config.render.resolution);
       },
       render({ time }) {
-        let index = 0;
         const scaledTime = time * config.motion.speed;
+        const colorCycleSpeed = config.motion.colorCycleSpeed;
+        const { glossyFalloff, barAlphaScale, specularWidth, specularFalloff, specularGain } = config.shading;
+        let index = 0;
         for (let y = 0; y < buffer.height; y++) {
-          let red = background & 255;
-          let green = background >>> 8 & 255;
-          let blue = background >>> 16 & 255;
+          let accR = bgR;
+          let accG = bgG;
+          let accB = bgB;
           for (const bar of config.bars) {
             const center = (bar.yBase + bar.amplitude * Math.sin(scaledTime * bar.frequency + bar.phase)) * buffer.height;
             const distance = y - center;
             const halfHeight = Math.max(2, bar.height * buffer.height);
-            if (Math.abs(distance) > halfHeight) continue;
+            if (distance > halfHeight || distance < -halfHeight) continue;
             const normalized = distance / halfHeight;
-            const falloff = 1 - Math.abs(normalized);
-            const glossy = falloff ** config.shading.glossyFalloff;
+            const absNormalized = normalized < 0 ? -normalized : normalized;
+            const falloff = 1 - absNormalized;
+            const glossy = falloff ** glossyFalloff;
+            const barAlpha = glossy * barAlphaScale;
             const color = samplePackedPalette(
               palette,
-              ((bar.colorOffset + normalized * 0.12 + scaledTime * config.motion.colorCycleSpeed) % 1 + 1) % 1
+              ((bar.colorOffset + normalized * 0.12 + scaledTime * colorCycleSpeed) % 1 + 1) % 1
             );
-            red += (color & 255) * glossy;
-            green += (color >>> 8 & 255) * glossy;
-            blue += (color >>> 16 & 255) * glossy;
-            if (Math.abs(distance) < config.shading.highlightWidth) {
-              red += config.shading.highlightStrength;
-              green += config.shading.highlightStrength;
-              blue += config.shading.highlightStrength;
+            let barR = color & 255;
+            let barG = color >>> 8 & 255;
+            let barB = color >>> 16 & 255;
+            if (absNormalized < specularWidth) {
+              const specularN = 1 - absNormalized / specularWidth;
+              const specular = specularN ** specularFalloff * specularGain;
+              barR += specular;
+              barG += specular;
+              barB += specular;
+              if (barR > 255) barR = 255;
+              if (barG > 255) barG = 255;
+              if (barB > 255) barB = 255;
             }
+            accR += (barR - accR) * barAlpha;
+            accG += (barG - accG) * barAlpha;
+            accB += (barB - accB) * barAlpha;
           }
-          const pixel = packRgb(Math.min(255, red), Math.min(255, green), Math.min(255, blue));
+          const pixel = packRgb(accR | 0, accG | 0, accB | 0);
           for (let x = 0; x < buffer.width; x++) buffer.pixels[index++] = pixel;
         }
         presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
@@ -2882,25 +2897,29 @@ void main() {
 
   // src/effects/copper-bars/config.js
   var DEFAULT_BARS = [
-    { yBase: 0.22, amplitude: 0.12, frequency: 0.7, phase: 0, height: 0.048, colorOffset: 0 },
-    { yBase: 0.4, amplitude: 0.1, frequency: 0.9, phase: 1, height: 0.063, colorOffset: 0.2 },
-    { yBase: 0.55, amplitude: 0.13, frequency: 0.6, phase: 2, height: 0.041, colorOffset: 0.4 },
-    { yBase: 0.7, amplitude: 0.11, frequency: 1, phase: 3, height: 0.074, colorOffset: 0.65 },
-    { yBase: 0.85, amplitude: 0.09, frequency: 0.8, phase: 4, height: 0.052, colorOffset: 0.85 }
+    { yBase: 0.18, amplitude: 0.055, frequency: 0.7, phase: 0, height: 0.062, colorOffset: 0 },
+    { yBase: 0.34, amplitude: 0.07, frequency: 0.9, phase: 1.1, height: 0.078, colorOffset: 0.18 },
+    { yBase: 0.52, amplitude: 0.05, frequency: 0.6, phase: 2.2, height: 0.054, colorOffset: 0.4 },
+    { yBase: 0.7, amplitude: 0.065, frequency: 1, phase: 3.3, height: 0.072, colorOffset: 0.62 },
+    { yBase: 0.86, amplitude: 0.045, frequency: 0.8, phase: 4.4, height: 0.058, colorOffset: 0.85 }
   ];
   var COPPER_BARS_DEFAULTS = createEffectDefaults({
     render: { resolution: 0.5, smoothing: true },
-    motion: { speed: 1, colorCycleSpeed: 0.06 },
+    motion: { speed: 1, colorCycleSpeed: 0.05 },
     appearance: {
-      palette: ["#ff244c", "#ffe844", "#28e880", "#35a8ff", "#dc4dff", "#ff244c"],
-      colorCount: 360,
-      backgroundColor: "#060812"
+      palette: ["#1a0a04", "#5e1d0a", "#b8430f", "#ff8a2a", "#ffe6c4", "#b8430f"],
+      colorCount: 256,
+      backgroundColor: "#0a0712"
     },
     bars: DEFAULT_BARS,
     shading: {
-      glossyFalloff: 0.7,
-      highlightStrength: 90,
-      highlightWidth: 1.5
+      // Bar core shape and bounded overlap composite (see renderer.js).
+      glossyFalloff: 0.62,
+      barAlphaScale: 0.92,
+      // Narrow specular expressed as a fraction of half-height.
+      specularWidth: 0.18,
+      specularFalloff: 3,
+      specularGain: 120
     }
   });
   function validateCopperBars(config) {
@@ -2908,21 +2927,35 @@ void main() {
       throw new RangeError("copperBars.bars must contain between 1 and 64 bars.");
     }
     config.bars.forEach((bar, index) => {
-      for (const key of ["yBase", "amplitude", "frequency", "phase", "height", "colorOffset"]) {
-        assertNumber(bar[key], `copperBars.bars[${index}].${key}`, {
-          min: ["amplitude", "frequency", "height"].includes(key) ? 0 : -Infinity
-        });
-      }
+      assertNumber(bar.yBase, `copperBars.bars[${index}].yBase`, { min: 0, max: 1 });
+      assertNumber(bar.amplitude, `copperBars.bars[${index}].amplitude`, { min: 0, max: 1 });
+      assertNumber(bar.frequency, `copperBars.bars[${index}].frequency`, { min: 0 });
+      assertNumber(bar.phase, `copperBars.bars[${index}].phase`);
+      assertNumber(bar.height, `copperBars.bars[${index}].height`, { min: 0, max: 1 });
+      assertNumber(bar.colorOffset, `copperBars.bars[${index}].colorOffset`, { min: 0, max: 1 });
     });
-    assertNumber(config.motion.colorCycleSpeed, "copperBars.motion.colorCycleSpeed");
+    assertNumber(config.motion.colorCycleSpeed, "copperBars.motion.colorCycleSpeed", { min: 0 });
     assertNumber(config.shading.glossyFalloff, "copperBars.shading.glossyFalloff", { min: Number.MIN_VALUE });
-    assertNumber(config.shading.highlightStrength, "copperBars.shading.highlightStrength", { min: 0 });
-    assertNumber(config.shading.highlightWidth, "copperBars.shading.highlightWidth", { min: 0 });
+    assertNumber(config.shading.barAlphaScale, "copperBars.shading.barAlphaScale", {
+      min: Number.MIN_VALUE,
+      max: 1
+    });
+    assertNumber(config.shading.specularWidth, "copperBars.shading.specularWidth", { min: 0, max: 1 });
+    assertNumber(config.shading.specularFalloff, "copperBars.shading.specularFalloff", {
+      min: Number.MIN_VALUE
+    });
+    assertNumber(config.shading.specularGain, "copperBars.shading.specularGain", { min: 0 });
   }
 
   // src/effects/copper-bars/skins.js
   var COPPER_BARS_SKINS = Object.freeze({
-    classic: Object.freeze({})
+    classic: Object.freeze({
+      appearance: Object.freeze({
+        backgroundColor: "#0a0712",
+        palette: Object.freeze(["#1a0a04", "#5e1d0a", "#b8430f", "#ff8a2a", "#ffe6c4", "#b8430f"]),
+        colorCount: 256
+      })
+    })
   });
 
   // src/effects/copper-bars/profiles.js
@@ -2930,12 +2963,29 @@ void main() {
   var RUNTIME_FULLSCREEN_MOBILE10 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP10 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE10 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
+  var BARS_DESKTOP = {
+    bars: [
+      { yBase: 0.18, amplitude: 0.055, frequency: 0.7, phase: 0, height: 0.062, colorOffset: 0 },
+      { yBase: 0.34, amplitude: 0.07, frequency: 0.9, phase: 1.1, height: 0.078, colorOffset: 0.18 },
+      { yBase: 0.52, amplitude: 0.05, frequency: 0.6, phase: 2.2, height: 0.054, colorOffset: 0.4 },
+      { yBase: 0.7, amplitude: 0.065, frequency: 1, phase: 3.3, height: 0.072, colorOffset: 0.62 },
+      { yBase: 0.86, amplitude: 0.045, frequency: 0.8, phase: 4.4, height: 0.058, colorOffset: 0.85 }
+    ]
+  };
+  var BARS_MOBILE = {
+    bars: [
+      { yBase: 0.16, amplitude: 0.05, frequency: 0.7, phase: 0, height: 0.058, colorOffset: 0 },
+      { yBase: 0.38, amplitude: 0.06, frequency: 0.9, phase: 1.3, height: 0.072, colorOffset: 0.22 },
+      { yBase: 0.62, amplitude: 0.055, frequency: 0.6, phase: 2.6, height: 0.066, colorOffset: 0.5 },
+      { yBase: 0.84, amplitude: 0.045, frequency: 0.8, phase: 3.9, height: 0.06, colorOffset: 0.78 }
+    ]
+  };
   var PREVIEW_RENDER6 = { render: { resolution: 0.3 } };
   var COPPER_BARS_PROFILES = buildProfiles({
-    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP10 },
-    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE10 },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP10, ...PREVIEW_RENDER6 },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE10, ...PREVIEW_RENDER6 }
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP10, ...BARS_DESKTOP },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE10, ...BARS_MOBILE },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP10, ...BARS_DESKTOP, ...PREVIEW_RENDER6 },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE10, ...BARS_MOBILE, ...PREVIEW_RENDER6 }
   });
 
   // src/effects/copper-bars/index.js
