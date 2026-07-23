@@ -163,7 +163,18 @@ export function resolveDescriptor(definition, descriptor) {
   // step from #2, but expressed as one composite overlay so per-(surface,device)
   // budgets are representable.
   const slotKey = `${surfaceName}.${resolvedDevice}`;
-  const profileOverlay = profiles.slots?.[slotKey] ?? {};
+  // Every effect must declare all four (surface × device) slots (#3): no
+  // implicit, undocumented fallbacks. If the matched slot is missing we fail
+  // loud rather than silently substituting an empty overlay, which would drop
+  // the effect's runtime budgets (maxFps/pixelRatio/pauseWhenHidden) and render
+  // resolution for this surface/device pair without any diagnostic.
+  if (!profiles.slots || !Object.prototype.hasOwnProperty.call(profiles.slots, slotKey)) {
+    throw new RangeError(
+      `${name}: profile slot '${slotKey}' is missing. Every effect must define all four slots: `
+      + 'fullscreen.desktop, fullscreen.mobile, preview.desktop, preview.mobile.'
+    );
+  }
+  const profileOverlay = profiles.slots[slotKey];
 
   const explicit = input.config ?? {};
   if (!isPlainObject(explicit)) {

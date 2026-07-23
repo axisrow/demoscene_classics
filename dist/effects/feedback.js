@@ -488,7 +488,12 @@
     const surfaceName = resolveSurface(name, input.surface, profiles.surfaces);
     const { requestedDevice, resolvedDevice } = resolveDevice(name, input.device, profiles.devices);
     const slotKey = `${surfaceName}.${resolvedDevice}`;
-    const profileOverlay = profiles.slots?.[slotKey] ?? {};
+    if (!profiles.slots || !Object.prototype.hasOwnProperty.call(profiles.slots, slotKey)) {
+      throw new RangeError(
+        `${name}: profile slot '${slotKey}' is missing. Every effect must define all four slots: fullscreen.desktop, fullscreen.mobile, preview.desktop, preview.mobile.`
+      );
+    }
+    const profileOverlay = profiles.slots[slotKey];
     const explicit = input.config ?? {};
     if (!isPlainObject(explicit)) {
       throw new TypeError(`${name}.config must be an object.`);
@@ -764,7 +769,7 @@
       }
     }
     return Object.freeze({
-      slots: Object.freeze(cloneSlots(slots)),
+      slots: Object.freeze(cloneSlots(slots, freezeValue)),
       surfaces: Object.freeze({
         fullscreen: Object.freeze({}),
         preview: Object.freeze({})
@@ -778,10 +783,10 @@
   function isPlainObject2(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
   }
-  function cloneSlots(slots) {
+  function cloneSlots(slots, freezeValue2) {
     const result = {};
     for (const key of SLOT_KEYS) {
-      result[key] = { ...slots[key] };
+      result[key] = freezeValue2(cloneValue(slots[key]));
     }
     return result;
   }

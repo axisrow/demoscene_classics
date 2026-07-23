@@ -21,6 +21,8 @@
 // the resolver to validate the requested surface/device), but the resolver no
 // longer merges them as separate overlays — it merges the one matched slot.
 
+import { cloneValue, freezeValue } from '../config.js';
+
 const SURFACES = ['fullscreen', 'preview'];
 const DEVICES = ['desktop', 'mobile'];
 const SLOT_KEYS = ['fullscreen.desktop', 'fullscreen.mobile', 'preview.desktop', 'preview.mobile'];
@@ -36,6 +38,12 @@ const SLOT_KEYS = ['fullscreen.desktop', 'fullscreen.mobile', 'preview.desktop',
  *
  * @param {Record<string, object>} slots - the four complete slot overlays.
  * @returns {{ slots: object, surfaces: object, devices: object }}
+ *   `slots` holds the four deep-cloned, deep-frozen overlays the resolver merges
+ *   for the matched (surface × resolved-device) pair. `surfaces` and `devices`
+ *   are EMPTY enumerations of the valid surface/device values only — they carry
+ *   no overlay data (all budget data lives in `slots`) and exist solely so the
+ *   resolver can validate the requested surface/device and so scripts/build.mjs
+ *   can enumerate them for the manifest.
  */
 export function buildProfiles(slots) {
   if (!slots || typeof slots !== 'object') {
@@ -56,7 +64,7 @@ export function buildProfiles(slots) {
   }
 
   return Object.freeze({
-    slots: Object.freeze(cloneSlots(slots)),
+    slots: Object.freeze(cloneSlots(slots, freezeValue)),
     surfaces: Object.freeze({
       fullscreen: Object.freeze({}),
       preview: Object.freeze({})
@@ -72,14 +80,17 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-// Shallow clone each slot so the frozen registry never aliases caller-owned
-// objects (an effect's profiles.js may reuse the same factored const across
-// slots). Deep immutability of the merged config is still enforced by the
-// resolver's freezeValue step.
-function cloneSlots(slots) {
+// Deep-clone and deep-freeze each slot so the frozen registry owns every
+// nested object and never aliases caller-owned objects. An effect's profiles.js
+// may spread the same factored const (e.g. a shared runtime budget) into
+// multiple slots; without a deep clone those slots' nested objects would alias
+// each other and the caller's module-level const, so mutating one would corrupt
+// the shared registry. The deep clone keeps slots independent and immutable at
+// the source. (cloneValue and freezeValue come from config.js.)
+function cloneSlots(slots, freezeValue) {
   const result = {};
   for (const key of SLOT_KEYS) {
-    result[key] = { ...slots[key] };
+    result[key] = freezeValue(cloneValue(slots[key]));
   }
   return result;
 }

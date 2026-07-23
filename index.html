@@ -50,10 +50,17 @@ for (const [index, effect] of EFFECTS.entries()) {
       <div class="run">▶ RUN ▸</div>
     </div>`;
   grid.appendChild(card);
-  Demoscene[effect.api](card.querySelector('canvas'), {
-    surface: 'preview',
-    device: 'auto'
-  });
+  // Mount the preview profile for this card. Isolate each mount so one effect
+  // that fails to resolve or mount (a profile/descriptor regression) degrades
+  // only its own card instead of aborting the whole gallery loop.
+  try {
+    Demoscene[effect.api](card.querySelector('canvas'), {
+      surface: 'preview',
+      device: 'auto'
+    });
+  } catch (error) {
+    console.error(`Failed to mount preview for ${effect.api}:`, error);
+  }
 }
 </script>
 </body>

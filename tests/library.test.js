@@ -5,7 +5,7 @@ import vm from 'node:vm';
 
 import { mandelbrotZoom, renderMandelbrotPixels } from '../src/effects/mandelbrot/mandelbrot-core.js';
 import { buildGradientPalette, packHexColor, packRgb } from '../src/effects/utils.js';
-import { PROFILE_SLOT_KEYS } from '../src/effects/profiles.js';
+import { PROFILE_SLOT_KEYS, buildProfiles } from '../src/effects/profiles.js';
 
 // [publicName, definition module, definition export, standalone filename, config defaults export]
 const EFFECTS = [
@@ -366,7 +366,7 @@ test('explicit device values bypass auto-detection', async () => {
   assert.equal(mobile.getSelection().requestedDevice, 'mobile');
 });
 
-test('merge precedence: defaults -> skin preset -> overrides -> surface -> device -> explicit config', async () => {
+test('merge precedence: defaults -> skin preset -> overrides -> matched profile slot -> explicit config', async () => {
   const environment = createEnvironment();
   await loadBundle('../dist/effects/plasma.js', environment);
 
@@ -609,6 +609,97 @@ async function loadDefinition(modulePath, exportName) {
   const mod = await import(url);
   return mod[exportName];
 }
+
+// Issue #3: the shared profile-registry builder validates its four slots and
+// hands back a frozen, self-contained registry. Direct unit tests exercise every
+// validation branch and the deep-clone immutability guarantee (an effect may
+// spread one factored const into several slots; the registry must not alias it).
+test('buildProfiles validates four slots and returns a deep-cloned frozen registry', () => {
+  // Happy path: four valid slots build a registry that owns its own objects.
+  const sharedRuntime = { maxFps: 60 };
+  const input = {
+    'fullscreen.desktop': { runtime: sharedRuntime },
+    'fullscreen.mobile': { runtime: { maxFps: 30 } },
+    'preview.desktop': { runtime: { maxFps: 30 }, render: { resolution: 0.2 } },
+    'preview.mobile': { runtime: { maxFps: 24 }, render: { resolution: 0.2 } }
+  };
+  const registry = buildProfiles(input);
+  assert.deepEqual(Object.keys(registry.slots).sort(), [...PROFILE_SLOT_KEYS].sort());
+  // The matched-slot values are intact.
+  assert.equal(registry.slots['preview.mobile'].runtime.maxFps, 24);
+  // surfaces/devices are empty enumerations only (no overlay data).
+  assert.deepEqual(registry.surfaces.fullscreen, {});
+  assert.deepEqual(registry.devices.desktop, {});
+
+  // The registry does not alias caller-owned objects, and mutating the input
+  // after build does not affect the frozen registry.
+  assert.equal(Object.is(registry.slots['fullscreen.desktop'], input['fullscreen.desktop']), false);
+  assert.equal(Object.is(registry.slots['fullscreen.desktop'].runtime, sharedRuntime), false);
+  input['fullscreen.desktop'].runtime.maxFps = 1;
+  assert.equal(registry.slots['fullscreen.desktop'].runtime.maxFps, 60);
+
+  // The returned slots are deeply frozen.
+  assert.equal(Object.isFrozen(registry.slots['fullscreen.desktop'].runtime), true);
+  assert.equal(Object.isFrozen(registry), true);
+
+  // Validation branches.
+  assert.throws(() => buildProfiles(null), /expects a slots object/);
+  assert.throws(() => buildProfiles('x'), /expects a slots object/);
+  assert.throws(() => buildProfiles({}), /Profile slot 'fullscreen\.desktop' is missing/);
+  assert.throws(
+    () => buildProfiles({
+      'fullscreen.desktop': [],
+      'fullscreen.mobile': {},
+      'preview.desktop': {},
+      'preview.mobile': {}
+    }),
+    /Profile slot 'fullscreen\.desktop' must be a plain object/
+  );
+  assert.throws(
+    () => buildProfiles({
+      'fullscreen.desktop': {},
+      'fullscreen.mobile': {},
+      'preview.desktop': {},
+      'preview.mobile': {},
+      'fullscreen.tablet': {}
+    }),
+    /Unknown profile slot 'fullscreen\.tablet'/
+  );
+});
+
+// Issue #3: the resolver fails loud when the matched (surface × resolved-device)
+// profile slot is missing — no silent empty-overlay fallback that would drop the
+// effect's runtime budgets. Uses a synthetic definition so the missing-slot path
+// is reachable (every shipped effect defines all four slots).
+test('resolver fails loud on a missing matched profile slot instead of silently applying defaults', async () => {
+  const { resolveDescriptor } = await import(new URL('../src/resolver.js', import.meta.url));
+  const definition = {
+    name: 'synthetic',
+    configDefaults: {
+      runtime: { autoStart: true, maxFps: 60, pixelRatio: 1, pauseWhenHidden: true },
+      render: { resolution: 1, smoothing: false },
+      motion: { speed: 1 },
+      appearance: { palette: ['#000000', '#ffffff'], colorCount: 256, backgroundColor: '#000000' }
+    },
+    validate: () => {},
+    skins: { classic: {} },
+    // Deliberately missing the preview.mobile slot.
+    profiles: {
+      slots: {
+        'fullscreen.desktop': {},
+        'fullscreen.mobile': {},
+        'preview.desktop': {}
+      },
+      surfaces: { fullscreen: {}, preview: {} },
+      devices: { desktop: {}, mobile: {} }
+    },
+    capabilities: { skinAllow: new Set(['runtime', 'render', 'motion', 'appearance']) }
+  };
+  assert.throws(
+    () => resolveDescriptor(definition, { surface: 'preview', device: 'mobile' }),
+    /synthetic: profile slot 'preview\.mobile' is missing/
+  );
+});
 
 // Issue #3: every effect exposes four explicit, complete, effect-owned profile
 // slots — one per (surface × device) combination — with no implicit fallbacks.
