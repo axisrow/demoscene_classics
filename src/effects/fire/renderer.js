@@ -6,6 +6,7 @@ import {
   presentPixelBuffer,
   resizePixelBuffer
 } from '../utils.js';
+import { paint, stepHeat } from './sim.js';
 
 export function createFireRenderer({ canvas, config }) {
   const context = getContext2D(canvas, { alpha: false });
@@ -14,53 +15,53 @@ export function createFireRenderer({ canvas, config }) {
     new Uint32Array(config.appearance.colorCount),
     config.appearance.palette
   );
+
+  // Heat state: normalized [0, 1] scalars in two ping-pong buffers so a step
+  // can read all of `cur` and write all of `next` without traversal-order
+  // feedback. Allocated in resize() once the grid size is known.
+  let cur = new Float32Array(0);
+  let next = new Float32Array(0);
   let random = createSeededRandom(config.simulation.seed);
-  let heat = new Uint8Array(0);
   let accumulator = 0;
   let width = 1;
   let height = 1;
 
-  function spread() {
-    const lastRow = buffer.height - 1;
-    for (let x = 0; x < buffer.width; x++) {
-      heat[lastRow * buffer.width + x] = random() < config.simulation.sourceDensity
-        ? config.simulation.sourceIntensity
-        : Math.floor(random() * config.simulation.sourceVariance);
-    }
-    for (let y = 1; y < buffer.height; y++) {
-      const row = y * buffer.width;
-      const previousRow = (y - 1) * buffer.width;
-      for (let x = 0; x < buffer.width; x++) {
-        const cooling = Math.floor(random() * (config.simulation.cooling + 1));
-        const drift = Math.floor((random() * 2 - 1) * (config.simulation.horizontalDrift + 1));
-        const targetX = (x + drift + buffer.width) % buffer.width;
-        heat[previousRow + targetX] = Math.max(0, heat[row + x] - cooling);
-      }
-    }
-  }
+  const stepSeconds = 1 / config.simulation.stepHz;
 
   return {
     resize(nextWidth, nextHeight) {
       width = nextWidth;
       height = nextHeight;
       resizePixelBuffer(buffer, width * config.render.resolution, height * config.render.resolution);
+      // Reallocate both heat buffers to the new grid and re-seed so a resize
+      // is a deterministic cold start: no stale heat from the previous grid
+      // survives, and the source RNG resumes from the same seed.
+      const cells = buffer.width * buffer.height;
+      cur = new Float32Array(cells);
+      next = new Float32Array(cells);
       random = createSeededRandom(config.simulation.seed);
-      heat = new Uint8Array(buffer.width * buffer.height);
       accumulator = 0;
     },
     render({ delta }) {
+      // Advance the simulation with fixed, bounded substeps. The accumulator is
+      // driven by wall-time delta scaled by motion.speed; each completed 1/stepHz
+      // interval is one heat step, capped at maxCatchUpSteps so a stalled tab
+      // cannot burst-compute an unbounded number of steps. Because stepHz is
+      // constant across profiles, every profile performs the same number of
+      // heat steps over a given wall-time window, keeping 24/30/60 FPS profiles
+      // visually comparable (maxFps only governs the runtime frame limiter).
       accumulator += delta * config.motion.speed;
-      const stepSeconds = 1 / config.simulation.stepHz;
       let steps = 0;
       while (accumulator >= stepSeconds && steps < config.simulation.maxCatchUpSteps) {
-        spread();
+        stepHeat(cur, next, buffer.width, buffer.height, config.simulation, random);
+        const tmp = cur;
+        cur = next;
+        next = tmp;
         accumulator -= stepSeconds;
         steps++;
       }
-      for (let i = 0; i < heat.length; i++) {
-        const paletteIndex = Math.round(heat[i] / 255 * (palette.length - 1));
-        buffer.pixels[i] = palette[paletteIndex];
-      }
+
+      paint(palette, cur, buffer.pixels);
       presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
     }
   };
