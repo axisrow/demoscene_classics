@@ -1524,11 +1524,11 @@
           zImaginarySquared = zImaginary * zImaginary;
           iteration++;
         }
-        if (iteration === maxIterations) {
+        const mag2 = zRealSquared + zImaginarySquared;
+        if (mag2 < escapeSquared) {
           pixels[index++] = interiorColor;
           continue;
         }
-        const mag2 = zRealSquared + zImaginarySquared;
         pixels[index++] = palette[mandelbrotPaletteIndex({
           iteration,
           mag2,
