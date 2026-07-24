@@ -745,7 +745,6 @@
       sourceIntensity: 1,
       cooling: 0.25,
       riseFrac: 1,
-      drift: 0,
       maxCatchUpSteps: 3
     }
   });
@@ -758,7 +757,6 @@
     assertNumber(sim.sourceIntensity, "fire.simulation.sourceIntensity", { min: 0, max: 1 });
     assertNumber(sim.cooling, "fire.simulation.cooling", { min: 0, max: 1 });
     assertNumber(sim.riseFrac, "fire.simulation.riseFrac", { min: 0.05, max: 4 });
-    assertNumber(sim.drift, "fire.simulation.drift", { min: 0, max: 1 });
     assertNumber(sim.maxCatchUpSteps, "fire.simulation.maxCatchUpSteps", { min: 1, max: 20, integer: true });
   }
 
