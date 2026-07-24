@@ -25,12 +25,15 @@ export function createPlasmaRenderer({ canvas, config }) {
   // lookup. It depends only on geometry (config), never on resolution.
   const totalAmplitude = field.amplitudes.reduce((sum, item) => sum + Math.abs(item), 0) || 1;
 
-  // Appearance-only contrast curve (gamma). Applied to the normalised field
+  // Appearance-only contrast curve (gamma), applied to the normalised field
   // value before palette indexing; it reshapes tonal distribution and never
-  // touches the field geometry. Bounded to (0, 1] so the value can never clip
-  // to a single flat band.
+  // touches the field geometry. The value is always in [0, 1], so raising it to
+  // any positive power keeps it in [0, 1] — it can never clip to a single flat
+  // band. gamma < 1 opens up the shadow band; gamma > 1 compresses midtones
+  // toward the highlights. The validator admits (0, 4]; we honour the whole
+  // range (a finite positive fallback of 1 guards a malformed value).
   const contrast = Number.isFinite(appearance.contrast) && appearance.contrast > 0
-    ? Math.min(1, appearance.contrast)
+    ? appearance.contrast
     : 1;
   const twoPi = Math.PI * 2;
   const motionPhaseScale = 1.2;

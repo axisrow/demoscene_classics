@@ -644,7 +644,7 @@
     );
     const { field, motion, render, appearance } = config;
     const totalAmplitude = field.amplitudes.reduce((sum, item) => sum + Math.abs(item), 0) || 1;
-    const contrast = Number.isFinite(appearance.contrast) && appearance.contrast > 0 ? Math.min(1, appearance.contrast) : 1;
+    const contrast = Number.isFinite(appearance.contrast) && appearance.contrast > 0 ? appearance.contrast : 1;
     const twoPi = Math.PI * 2;
     const motionPhaseScale = 1.2;
     let width = 1;

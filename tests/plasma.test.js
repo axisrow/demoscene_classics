@@ -433,6 +433,28 @@ test('an appearance-only skin override cannot change the field geometry', () => 
   assert.equal(new Set(a).size, new Set(b).size, 'palette swap must not change the field bucket count');
 });
 
+test('the contrast gamma honours the whole validated (0, 4] range, not just <= 1', () => {
+  // Regression guard: the renderer must NOT clamp contrast to 1. The validator
+  // admits up to 4, so a contrast of 2 (compress midtones toward highlights)
+  // must produce a visibly different frame from contrast 1 — otherwise valid
+  // user input is silently ignored. We render the same geometry at contrast 1
+  // and contrast 2.5 and require the tonal distributions to differ.
+  const TIME = 0.5;
+  const render = (contrast) => {
+    const m = mount(200, 120, { appearance: { contrast } });
+    m.renderer.render({ time: TIME, delta: 0 });
+    return bufferPixels(m).data;
+  };
+  const neutral = render(1);
+  const compressed = render(2.5);
+  let differing = 0;
+  for (let i = 0; i < neutral.length; i++) if (neutral[i] !== compressed[i]) differing++;
+  assert.ok(
+    differing / neutral.length > 0.1,
+    `contrast 2.5 must reshape the frame vs contrast 1 (only ${(differing / neutral.length * 100).toFixed(1)}% differed — is it clamped to 1?)`
+  );
+});
+
 test('validatePlasma accepts defaults and rejects out-of-range geometry', () => {
   assert.doesNotThrow(() => validatePlasma(configWith()));
   const base = configWith();
