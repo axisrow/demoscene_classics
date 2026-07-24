@@ -147,23 +147,52 @@ function distributionDistance(a, b) {
   return sum / 2;
 }
 
-test('render.resolution changes sampling density only — same field distribution at the same time/config', () => {
+// Map a normalized viewport point (nx, ny) in [0,1]² to the buffer cell that
+// samples it, and return that cell's packed colour. The renderer samples cell
+// (bx, by) at nx=(bx+0.5)/w, ny=(by+0.5)/h, so the inverse is bx=round(nx*w-0.5).
+function colourAtNormalized(pixels, nx, ny) {
+  const bx = Math.min(pixels.width - 1, Math.max(0, Math.round(nx * pixels.width - 0.5)));
+  const by = Math.min(pixels.height - 1, Math.max(0, Math.round(ny * pixels.height - 0.5)));
+  return pixels.data[by * pixels.width + bx];
+}
+
+test('render.resolution changes sampling density only — same normalized point resolves to the same field value', () => {
+  // The decisive test: the field is a pure function of (u, v, time). At a fixed
+  // time/config, the SAME normalized point must resolve to the same palette
+  // colour regardless of sampling density. A resolution-COUPLED field (wavelength
+  // tied to buffer pixels) would fail this even though its overall colour
+  // histogram looks similar. We probe several off-centre normalized points.
   const TIME = 0.83;
   const runs = [1, 0.5, 0.25].map((res) => {
     const m = mount(400, 240, { render: { resolution: res } });
     m.renderer.render({ time: TIME, delta: 0 });
     return { res, pixels: bufferPixels(m) };
   });
-  // The colour distribution is near-identical across resolutions (the same field
-  // sampled more or less densely). TV distance is well below 0.1 in practice.
-  const histFull = colourHistogram(runs[0].pixels);
-  for (const { res, pixels } of runs.slice(1)) {
-    const d = distributionDistance(histFull, colourHistogram(pixels));
-    assert.ok(d < 0.1, `resolution ${res} drifted the field distribution (TV=${d.toFixed(3)})`);
+  const PROBES = [[0.3, 0.2], [0.7, 0.4], [0.5, 0.5], [0.15, 0.8], [0.85, 0.65]];
+  for (const [nx, ny] of PROBES) {
+    const full = colourAtNormalized(runs[0].pixels, nx, ny);
+    for (const { res, pixels } of runs.slice(1)) {
+      const here = colourAtNormalized(pixels, nx, ny);
+      // Allow a 1-palette-step tolerance for cell-centre rounding between grids.
+      const d = Math.min(
+        Math.abs((full & 0xff) - (here & 0xff)),
+        255
+      );
+      assert.ok(
+        full === here || d <= 24,
+        `resolution ${res} moved the field at normalized (${nx},${ny}): ${full} vs ${here}`
+      );
+    }
   }
   // And the buffers really did shrink (sampling cost scaled down).
   assert.ok(runs[0].pixels.width > runs[1].pixels.width, '0.5 samples fewer cells than 1.0');
   assert.ok(runs[1].pixels.width > runs[2].pixels.width, '0.25 samples fewer cells than 0.5');
+  // The colour distribution is also near-identical (a weaker backstop).
+  const histFull = colourHistogram(runs[0].pixels);
+  for (const { res, pixels } of runs.slice(1)) {
+    const dist = distributionDistance(histFull, colourHistogram(pixels));
+    assert.ok(dist < 0.1, `resolution ${res} drifted the field distribution (TV=${dist.toFixed(3)})`);
+  }
 });
 
 test('the geometry never reads buffer pixels: doubling the canvas keeps the same field distribution', () => {
@@ -180,55 +209,60 @@ test('the geometry never reads buffer pixels: doubling the canvas keeps the same
 
 // --- aspect correction -----------------------------------------------------
 
-test('radial structure stays circular: the radius from the centre is isotropic in landscape and portrait', () => {
-  // With aspect correction, the radial term uses a true Euclidean distance in
-  // viewport-height units, so a ring of a given radius is a circle (not an
-  // ellipse) at any aspect. We isolate the radial term by zeroing the axis and
-  // diagonal waves, then sample the field value along the +x and +y rays from
-  // the centre and confirm the FIRST zero-crossing (a landmark ring) lands at
-  // the same normalized radius on both axes.
+test('radial structure stays circular: equal Euclidean radii sample equal field values on +x and +y (landscape and portrait)', () => {
+  // Isolate the radial term (zero the axis + diagonal waves). With aspect
+  // correction the radial field is f(sqrt(u²+v²)) where u=nx·aspect, v=ny — a
+  // true circle. So a point at normalized radius r along +x (nx = 0.5 + r/aspect,
+  // ny = 0.5) and a point at the SAME radius r along +y (nx = 0.5, ny = 0.5 + r)
+  // sit on the same ring and MUST render the same palette colour. We sample
+  // several radii in BOTH landscape and portrait; every pair must match.
   const isolateRadial = {
-    field: {
-      amplitudes: [0, 0, 0, 1],
-      frequencies: [0, 0, 0, 6],
-      phaseRates: [0, 0, 0, 0]
-    }
+    field: { amplitudes: [0, 0, 0, 1], frequencies: [0, 0, 0, 5], phaseRates: [0, 0, 0, 0] }
   };
-  // Evaluate the renderer's field indirectly: mount square-ish buffers with two
-  // aspect ratios and find where the rendered colour along each axis first
-  // repeats (the radial ring pitch). The ring pitch in viewport-height units
-  // must match between +x and +y AND between landscape and portrait.
-  function ringPitchAxis(width, height) {
-    const m = mount(width, height, isolateRadial);
-    m.renderer.render({ time: 0, delta: 0 });
-    const { width: w, height: h, data } = bufferPixels(m);
-    const cx = Math.floor(w / 2);
-    const cy = Math.floor(h / 2);
-    const centre = data[cy * w + cx];
-    // Walk outward along +x and +y until the colour returns to the centre value
-    // (one full radial period), recording the normalized distance.
-    function firstReturn(getX, getY, extent) {
-      for (let i = 1; i < extent; i++) {
-        const px = data[getY(i) * w + getX(i)];
-        if (px === centre && i > 1) return i;
-      }
-      return extent;
-    }
-    const rx = firstReturn((i) => cx + i, (i) => cy, w - cx); // in buffer cells (x)
-    const ry = firstReturn((i) => cx, (i) => cy + i, h - cy); // in buffer cells (y)
-    // Normalize each axis to viewport-height units: x in buffer cells scales by
-    // (h/w) (because u = nx*aspect = nx*w/h), y is already in height units.
-    return { xUnits: rx * (h / w), yUnits: ry };
-  }
-  // Landscape 2:1 and portrait 1:2: the radial period on +x and +y must match
-  // within half a buffer cell of tolerance.
   for (const [w, h] of [[400, 200], [200, 400]]) {
-    const { xUnits, yUnits } = ringPitchAxis(w, h);
-    assert.ok(
-      Math.abs(xUnits - yUnits) <= 0.02,
-      `radial ring pitch x(${xUnits.toFixed(3)}) vs y(${yUnits.toFixed(3)}) must match at ${w}x${h}`
-    );
+    const m = mount(w, h, isolateRadial);
+    m.renderer.render({ time: 0, delta: 0 });
+    const pixels = bufferPixels(m);
+    const aspect = pixels.width / pixels.height; // buffer aspect (== canvas aspect)
+    // Radii chosen to stay inside the frame on BOTH axes: along +x the reach in
+    // normalized-x is r/aspect (must be < 0.5 → r < 0.5·aspect), along +y it is r
+    // (must be < 0.5). Take fractions of that shared ceiling so both landscape
+    // and portrait get several in-frame radii.
+    const maxR = Math.min(0.5, 0.5 * aspect) - 0.03;
+    const radii = [0.35, 0.55, 0.75, 0.95].map((frac) => +(maxR * frac).toFixed(4));
+    let matches = 0, pairs = 0;
+    for (const r of radii) {
+      const onX = colourAtNormalized(pixels, 0.5 + r / aspect, 0.5); // u = r, v = 0
+      const onY = colourAtNormalized(pixels, 0.5, 0.5 + r); //           u = 0, v = r
+      pairs++;
+      if (onX === onY) matches++;
+    }
+    assert.ok(pairs >= 3, `need at least three radii inside ${w}x${h} (got ${pairs})`);
+    assert.equal(matches, pairs,
+      `radial field must be isotropic at ${w}x${h}: ${matches}/${pairs} equal-radius pairs matched`);
   }
+});
+
+test('WITHOUT aspect correction the same equal-radius probe is anisotropic (guards the test itself)', () => {
+  // Sanity check that the isotropy probe above actually has teeth: turn aspect
+  // correction OFF and the equal-radius +x vs +y colours must DIVERGE on a
+  // non-square canvas (the ring becomes an ellipse in normalized-x). If this
+  // test ever passes trivially, the isotropy test is inert.
+  const m = mount(400, 200, {
+    field: { amplitudes: [0, 0, 0, 1], frequencies: [0, 0, 0, 5], phaseRates: [0, 0, 0, 0], aspectCorrection: false }
+  });
+  m.renderer.render({ time: 0, delta: 0 });
+  const pixels = bufferPixels(m);
+  // Without aspect correction u = nx (not nx·aspect), so along +x the field
+  // reaches radius r at nx = 0.5 + r; sample the same nx offset on each axis.
+  let diverged = 0, pairs = 0;
+  for (const r of [0.15, 0.25, 0.35]) {
+    const onX = colourAtNormalized(pixels, 0.5 + r, 0.5);
+    const onY = colourAtNormalized(pixels, 0.5, 0.5 + r);
+    pairs++;
+    if (onX !== onY) diverged++;
+  }
+  assert.ok(diverged >= 1, `un-corrected field must be anisotropic on 400x200 (${diverged}/${pairs} pairs diverged)`);
 });
 
 test('a circular landmark does not stretch into an ellipse when aspect correction is on', () => {
