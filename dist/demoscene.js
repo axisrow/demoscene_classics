@@ -819,17 +819,34 @@
     const xStart = W - widthCells >> 1;
     return { depthRows, widthCells, xStart, firstSourceRow: H - depthRows };
   }
+  function riseStride(H, riseFrac, stepHz) {
+    return riseFrac / stepHz * H;
+  }
   function coolingPerStep(H, cooling) {
     return Math.min(6 * cooling / H, 0.95);
   }
-  function advect(cur, W, below, x) {
+  function rowAverage(cur, W, rowOffset, x) {
     const xl = x === 0 ? W - 1 : x - 1;
     const xr = x === W - 1 ? 0 : x + 1;
-    return (cur[below + xl] + cur[below + x] + cur[below + xr]) / 3;
+    return (cur[rowOffset + xl] + cur[rowOffset + x] + cur[rowOffset + xr]) / 3;
+  }
+  function advect(cur, W, x, y, stride, lastRow) {
+    const below = y + stride;
+    let y0 = Math.floor(below);
+    let y1 = y0 + 1;
+    if (y0 > lastRow) y0 = lastRow;
+    if (y1 > lastRow) y1 = lastRow;
+    const frac = below - Math.floor(below);
+    const lo = rowAverage(cur, W, y0 * W, x);
+    if (frac === 0 || y0 === y1) return lo;
+    const hi = rowAverage(cur, W, y1 * W, x);
+    return lo + (hi - lo) * frac;
   }
   function stepHeat(cur, next, W, H, params, rng) {
     const { depthRows, widthCells, xStart, firstSourceRow } = sourceGeometry(W, H, params);
     const loss = coolingPerStep(H, params.cooling);
+    const stride = riseStride(H, params.riseFrac, params.stepHz);
+    const coolFactor = Math.pow(1 - loss, stride);
     const intensity = params.sourceIntensity;
     const lastRow = H - 1;
     const denom = widthCells > 1 ? widthCells - 1 : 1;
@@ -846,20 +863,17 @@
     }
     for (let y = 0; y < firstSourceRow; y++) {
       const row = y * W;
-      const below = (y + 1) * W;
       for (let x = 0; x < W; x++) {
-        next[row + x] = clamp01(advect(cur, W, below, x) * (1 - loss));
+        next[row + x] = clamp01(advect(cur, W, x, y, stride, lastRow) * coolFactor);
       }
     }
     for (let y = firstSourceRow; y <= lastRow; y++) {
-      if (y === lastRow) continue;
       const row = y * W;
-      const below = (y + 1) * W;
       for (let x = 0; x < xStart; x++) {
-        next[row + x] = clamp01(advect(cur, W, below, x) * (1 - loss));
+        next[row + x] = clamp01(advect(cur, W, x, y, stride, lastRow) * coolFactor);
       }
       for (let x = xStart + widthCells; x < W; x++) {
-        next[row + x] = clamp01(advect(cur, W, below, x) * (1 - loss));
+        next[row + x] = clamp01(advect(cur, W, x, y, stride, lastRow) * coolFactor);
       }
     }
   }
@@ -931,7 +945,8 @@
       sourceWidthFrac: 0.8,
       sourceDepthFrac: 0.06,
       sourceIntensity: 1,
-      cooling: 0.5,
+      cooling: 0.25,
+      riseFrac: 1,
       drift: 0,
       maxCatchUpSteps: 3
     }
@@ -944,6 +959,7 @@
     assertNumber(sim.sourceDepthFrac, "fire.simulation.sourceDepthFrac", { min: 0.01, max: 0.5 });
     assertNumber(sim.sourceIntensity, "fire.simulation.sourceIntensity", { min: 0, max: 1 });
     assertNumber(sim.cooling, "fire.simulation.cooling", { min: 0, max: 1 });
+    assertNumber(sim.riseFrac, "fire.simulation.riseFrac", { min: 0.05, max: 4 });
     assertNumber(sim.drift, "fire.simulation.drift", { min: 0, max: 1 });
     assertNumber(sim.maxCatchUpSteps, "fire.simulation.maxCatchUpSteps", { min: 1, max: 20, integer: true });
   }
