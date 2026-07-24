@@ -7,11 +7,15 @@ import { assertNumber, createEffectDefaults } from '../../config.js';
 // different `render.resolution` changes only the sampling COST — the number of
 // grid cells — never the apparent flame height, silhouette, or cooling speed.
 //
-//   cooling           canonical public override (height-normalized). The per-step
-//                     heat loss is `min((6·cooling) / H, 0.95)` where H is the
-//                     grid height in rows, so the flame occupies roughly the
-//                     same VERTICAL FRACTION of the grid at every resolution
-//                     (≈0.95–0.99 of grid height at cooling 0.5).
+//   cooling           canonical public override (height-normalized). The base
+//                     per-step loss is `min((6·cooling) / H, 0.95)` (H = grid
+//                     height in rows), raised to the rise stride so the flame
+//                     occupies roughly the same VERTICAL FRACTION of the grid at
+//                     every resolution (≈0.78 of grid height at cooling 0.25).
+//   riseFrac          fraction of grid height heat rises per SECOND. The
+//                     advection stride per step is `(riseFrac / stepHz) * H`
+//                     rows (fractional, bilinearly interpolated), so warm-up
+//                     timing — not just steady state — is resolution-independent.
 //   sourceWidthFrac   fraction of grid width the seeded heat source spans.
 //   sourceDepthFrac   fraction of grid height the heat source fills.
 //   sourceIntensity   normalized source heat in (0, 1].
@@ -36,7 +40,8 @@ export const FIRE_DEFAULTS = createEffectDefaults({
     sourceWidthFrac: 0.8,
     sourceDepthFrac: 0.06,
     sourceIntensity: 1.0,
-    cooling: 0.5,
+    cooling: 0.25,
+    riseFrac: 1.0,
     drift: 0,
     maxCatchUpSteps: 3
   }
@@ -55,6 +60,7 @@ export function validateFire(config) {
   assertNumber(sim.sourceDepthFrac, 'fire.simulation.sourceDepthFrac', { min: 0.01, max: 0.5 });
   assertNumber(sim.sourceIntensity, 'fire.simulation.sourceIntensity', { min: 0, max: 1 });
   assertNumber(sim.cooling, 'fire.simulation.cooling', { min: 0, max: 1 });
+  assertNumber(sim.riseFrac, 'fire.simulation.riseFrac', { min: 0.05, max: 4 });
   assertNumber(sim.drift, 'fire.simulation.drift', { min: 0, max: 1 });
   assertNumber(sim.maxCatchUpSteps, 'fire.simulation.maxCatchUpSteps', { min: 1, max: 20, integer: true });
 }

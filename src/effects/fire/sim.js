@@ -20,12 +20,18 @@
 //     buffer and writes ONLY the next buffer at disjoint indices, so the result
 //     never depends on loop traversal order.
 //
-// Cooling is normalized to grid height: `coolingPerStep = min(cooling / H, 0.9)`.
-// A cell leaving the source cools as h_n = h_{n-1} * (1 - cooling/H), so the
-// number of rows heat survives scales with H — the flame occupies roughly the
-// same VERTICAL FRACTION of the grid at every resolution. `render.resolution`
-// therefore changes only the sampling cost, not the apparent flame height or
-// cooling speed.
+//   - Vertical RISE is height-normalized too: each step the advection samples
+//     the row `stride = (riseFrac / stepHz) * H` rows below, bilinearly
+//     interpolated between the two nearest integer rows. Heat therefore rises a
+//     fixed FRACTION of the grid per second, so warm-up timing — not just the
+//     steady-state flame height — is resolution-independent.
+//
+// Cooling is normalized to grid height: `coolingPerStep = min((6·cooling) / H, 0.95)`,
+// and stepHeat scales the per-step loss by the rise stride (`(1−loss)^stride`) so
+// heat decaying over a fractional height u reaches `source·(1−loss)^(u·H)` — the
+// same VERTICAL FRACTION of the grid at every resolution, for both the steady-state
+// flame height and the warm-up transient. `render.resolution` therefore changes
+// only the sampling cost, not the apparent flame height, cooling speed, or warm-up.
 
 import { createSeededRandom } from '../utils.js';
 
@@ -53,18 +59,35 @@ export function sourceGeometry(W, H, { sourceWidthFrac, sourceDepthFrac }) {
 }
 
 /**
- * Height-normalized per-step cooling loss.
+ * Per-step vertical rise in grid rows, height-normalized so heat rises a fixed
+ * FRACTION of the grid per second. `stride = (riseFrac / stepHz) * H`; it is
+ * fractional and consumed by bilinear interpolation in stepHeat. At riseFrac=1
+ * and stepHz=60, heat traverses the full grid height in one second at any
+ * resolution, so the warm-up transient (not just steady state) matches across
+ * render.resolutions.
  *
- * Stationary heat `y` rows above the source decays as `source·(1−loss)^y`, so
- * the flame is visible (heat > ~0.05) up to `y_max = ln(0.05)/ln(1−loss)` rows.
- * With `loss = (K·cooling)/H` (K=6 below), `y_max/H` is approximately constant
- * across grid heights — the flame occupies the same VERTICAL FRACTION of the
- * grid at every resolution, so `render.resolution` changes only the sampling
- * cost, never the apparent flame height. Empirically `cooling=0.5` ⇒ flame ≈
- * 0.95–0.99 of grid height; `cooling` scales that fraction smoothly in [0,1].
+ * @param {number} H grid height
+ * @param {number} riseFrac fraction of grid height risen per second
+ * @param {number} stepHz simulation steps per second
+ * @returns {number}
+ */
+export function riseStride(H, riseFrac, stepHz) {
+  return (riseFrac / stepHz) * H;
+}
+
+/**
+ * Height-normalized per-step cooling loss (before stride-scaling).
  *
- * The clamp keeps the (1 − loss) factor in [0.05, 1] on very short grids
- * (H < ~6), so the simulation stays bounded and stable everywhere.
+ * With `loss = (K·cooling)/H` (K=6 below), heat decaying over a fractional
+ * height `u` (in grid-height units) reaches `source·(1−loss)^(u·H)`, which is
+ * independent of H — so the steady-state flame height is the same VERTICAL
+ * FRACTION of the grid at every resolution. stepHeat raises this base loss to
+ * the power of the rise stride (`coolFactor = (1−loss)^stride`) so a stride
+ * jump cools as if it traversed every virtual sub-row; the product stays
+ * `(1−loss)^(u·H)` regardless of stride.
+ *
+ * The clamp keeps the base factor in [0.05, 1] on very short grids (H < ~6),
+ * so the simulation stays bounded and stable everywhere.
  *
  * @param {number} H grid height
  * @param {number} cooling cooling strength in [0, 1]
@@ -74,12 +97,32 @@ export function coolingPerStep(H, cooling) {
   return Math.min((6 * cooling) / H, 0.95);
 }
 
-// Average the three cells in the row directly below (x-1, x, x+1) of (x, y),
-// reading from `cur`. Wraps horizontally so the flame has no hard side walls.
-function advect(cur, W, below, x) {
+// Three-tap horizontal average (x-1, x, x+1) of one integer row, reading from
+// `cur`. Wraps horizontally so the flame has no hard side walls.
+function rowAverage(cur, W, rowOffset, x) {
   const xl = x === 0 ? W - 1 : x - 1;
   const xr = x === W - 1 ? 0 : x + 1;
-  return (cur[below + xl] + cur[below + x] + cur[below + xr]) / 3;
+  return (cur[rowOffset + xl] + cur[rowOffset + x] + cur[rowOffset + xr]) / 3;
+}
+
+// Bilinear vertical interpolation of the 3-tap horizontal average at the
+// fractional row `below = y + stride`. Sampling rows are clamped only to the
+// grid bounds `[0, lastRow]`: heat must travel up step by step through real
+// cells (a cold region stays cold until the rising wavefront reaches it), so
+// we never redirect a sample into the source band. A sample that falls past
+// the floor re-reads the bottom row (the source boundary). The (1 - loss)
+// cooling applied by the caller then governs the steady-state flame height.
+function advect(cur, W, x, y, stride, lastRow) {
+  const below = y + stride;
+  let y0 = Math.floor(below);
+  let y1 = y0 + 1;
+  if (y0 > lastRow) y0 = lastRow;
+  if (y1 > lastRow) y1 = lastRow;
+  const frac = below - Math.floor(below);
+  const lo = rowAverage(cur, W, y0 * W, x);
+  if (frac === 0 || y0 === y1) return lo;
+  const hi = rowAverage(cur, W, y1 * W, x);
+  return lo + (hi - lo) * frac;
 }
 
 /**
@@ -94,12 +137,19 @@ function advect(cur, W, below, x) {
  * @param {Float32Array} next next heat field (written)
  * @param {number} W grid width
  * @param {number} H grid height
- * @param {object} params `{ sourceWidthFrac, sourceDepthFrac, sourceIntensity, cooling }`
+ * @param {object} params `{ sourceWidthFrac, sourceDepthFrac, sourceIntensity, cooling, riseFrac, stepHz }`
  * @param {() => number} rng deterministic seeded RNG (consumed over the source band)
  */
 export function stepHeat(cur, next, W, H, params, rng) {
   const { depthRows, widthCells, xStart, firstSourceRow } = sourceGeometry(W, H, params);
   const loss = coolingPerStep(H, params.cooling);
+  const stride = riseStride(H, params.riseFrac, params.stepHz);
+  // Scale the per-step cooling by the stride: when heat jumps `stride` rows in
+  // one step it must cool as if it passed through all `stride` virtual sub-rows,
+  // so the decay to a fractional height u is (1-loss)^(u·H) regardless of stride
+  // — steady-state flame height stays resolution-independent, while the
+  // height-scaled stride keeps warm-up timing resolution-independent too.
+  const coolFactor = Math.pow(1 - loss, stride);
   const intensity = params.sourceIntensity;
   const lastRow = H - 1;
   const denom = widthCells > 1 ? widthCells - 1 : 1;
@@ -125,29 +175,30 @@ export function stepHeat(cur, next, W, H, params, rng) {
     }
   }
 
-  // 2. Diffusion/advection above the source band: average the three cells in
-  //    the row directly below, cool, clamp. No RNG — fully deterministic.
+  // 2. Diffusion/advection above the source band: pull heat from `stride` rows
+  //    below (bilinearly interpolated across the fractional offset), cool, and
+  //    clamp. No RNG — fully deterministic. The height-scaled stride makes the
+  //    flame rise a fixed fraction of the grid per second (resolution-independent
+  //    warm-up); the cooling loss makes the steady-state flame height a fixed
+  //    fraction of the grid (resolution-independent steady state).
   for (let y = 0; y < firstSourceRow; y++) {
     const row = y * W;
-    const below = (y + 1) * W;
     for (let x = 0; x < W; x++) {
-      next[row + x] = clamp01(advect(cur, W, below, x) * (1 - loss));
+      next[row + x] = clamp01(advect(cur, W, x, y, stride, lastRow) * coolFactor);
     }
   }
 
   // 3. Cells inside source rows but OUTSIDE source columns still advect from
   //    below (otherwise the flame would be clipped to a hard rectangle at the
-  //    source edges). The lowest row has nothing below it, so those off-source
-  //    cells stay cold.
+  //    source edges). The lowest row samples itself (clamped), which is the
+  //    off-source cold floor.
   for (let y = firstSourceRow; y <= lastRow; y++) {
-    if (y === lastRow) continue; // nothing below the floor
     const row = y * W;
-    const below = (y + 1) * W;
     for (let x = 0; x < xStart; x++) {
-      next[row + x] = clamp01(advect(cur, W, below, x) * (1 - loss));
+      next[row + x] = clamp01(advect(cur, W, x, y, stride, lastRow) * coolFactor);
     }
     for (let x = xStart + widthCells; x < W; x++) {
-      next[row + x] = clamp01(advect(cur, W, below, x) * (1 - loss));
+      next[row + x] = clamp01(advect(cur, W, x, y, stride, lastRow) * coolFactor);
     }
   }
 }

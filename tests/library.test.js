@@ -542,7 +542,7 @@ test('classic default frames remain pixel-stable and unchanged from the v2 basel
   }
   assert.deepEqual(snapshots, {
     plasma: 'pixels:19981681',
-    fire: 'pixels:b49f7c2f',
+    fire: 'pixels:9aac868b',
     starfield: 'vector:95857935',
     metaballs: 'pixels:b18e0d45',
     tunnel: 'pixels:ac04a300',

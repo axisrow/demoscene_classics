@@ -109,6 +109,29 @@ test('flame height is resolution-independent: stable fraction across grid height
   assert.ok((max - min) / min < 0.10, `flame-height fraction not stable: ${fracs.join(', ')}`);
 });
 
+test('warm-up timing is resolution-independent: parity at 1.5 s, not only steady state', () => {
+  // Heat must rise a fixed FRACTION of grid height per second, so the transient
+  // warm-up (1.5 s = 90 steps) — not just the steady state — matches across
+  // resolutions. A one-row-per-step rise would fill a short grid far faster
+  // than a tall one, making warm-up (and thus the 1.5 s QA capture) depend on
+  // render.resolution, which the issue forbids.
+  const STEPS = 90; // 1.5 s @ stepHz 60
+  const heights = [];
+  const occs = [];
+  for (const H of [180, 90, 45]) {
+    const W = Math.round((H * 16) / 9);
+    const heat = runSteps(W, H, DEFAULT_PARAMS, STEPS, 1993);
+    heights.push(flameHeightFraction(heat, W, H));
+    occs.push(occupiedRatio(heat));
+  }
+  const hMin = Math.min(...heights);
+  const hMax = Math.max(...heights);
+  assert.ok((hMax - hMin) / hMin < 0.20, `warm-up flame height not stable across resolutions: ${heights.join(', ')}`);
+  const oMin = Math.min(...occs);
+  const oMax = Math.max(...occs);
+  assert.ok((oMax - oMin) / oMin < 0.25, `warm-up occupied area not stable across resolutions: ${occs.join(', ')}`);
+});
+
 test('normalized cooling: doubling cooling roughly halves the flame height', () => {
   // From the decay model h_n = source·(1−loss)^n, flame height ∝ 1/cooling, so
   // doubling cooling should roughly halve the height. Verified at threshold 0.3
