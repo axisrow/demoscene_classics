@@ -77,6 +77,61 @@ export function parseCaptureFilename(filename) {
   };
 }
 
+// Stable identity for a manifest capture entry. The filename already encodes
+// every identifying field (effect/profile/dimensions/timestamp, see
+// captureFilename), so it is the canonical key for "same capture slot". Used by
+// mergeManifest to replace-in-place the entries a subset run re-rendered while
+// leaving every other effect's entries untouched.
+export function captureEntryKey(entry) {
+  if (!entry || typeof entry.file !== 'string') return null;
+  return entry.file.split('/').pop();
+}
+
+// Merge a fresh batch of capture entries into an existing manifest.
+//
+// A subset capture run (--effect/--profile) re-renders only its own slice of
+// the matrix (e.g. the 12 metaballs frames). Its manifest write MUST NOT
+// replace the whole manifest with that slice — that would silently drop every
+// other effect's entries and shrink captureCount (the #27 regression: 120 ->
+// 12). Instead each freshly captured entry replaces the existing entry with the
+// same slot key (filename); entries not re-rendered are preserved verbatim.
+//
+// `existing` may be null/undefined (first capture into an empty dir, or a
+// corrupt/missing manifest): the merge then behaves like a fresh write, which
+// is correct — a full run also writes from scratch.
+//
+// `fresh` is the array of entries produced by this run. `meta` carries the
+// top-level scalar fields to stamp onto the merged manifest
+// (generatedAt/playwrightVersion/chromiumBuild). Returns the full merged
+// manifest object (captures in existing order with replacements applied, new
+// slots appended).
+export function mergeManifest(existing, fresh, meta) {
+  const byKey = new Map();
+  const orderedKeys = [];
+  if (existing && Array.isArray(existing.captures)) {
+    for (const entry of existing.captures) {
+      const key = captureEntryKey(entry);
+      if (key === null || byKey.has(key)) continue;
+      byKey.set(key, entry);
+      orderedKeys.push(key);
+    }
+  }
+  for (const entry of fresh) {
+    const key = captureEntryKey(entry);
+    if (key === null) continue;
+    if (!byKey.has(key)) orderedKeys.push(key);
+    byKey.set(key, entry);
+  }
+  const captures = orderedKeys.map((key) => byKey.get(key));
+  return {
+    generatedAt: meta.generatedAt,
+    playwrightVersion: meta.playwrightVersion,
+    chromiumBuild: meta.chromiumBuild,
+    captureCount: captures.length,
+    captures
+  };
+}
+
 // A case is one effect rendered in one profile. A capture is one frame of a
 // case at one timestamp. The full matrix is 10 effects x 4 profiles x 3
 // timestamps = 120 captures.

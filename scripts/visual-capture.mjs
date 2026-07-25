@@ -11,10 +11,10 @@
 //   node scripts/visual-capture.mjs --out visual/baselines           # baseline update
 
 import { spawn } from 'node:child_process';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildMatrix, parseCaptureFilename } from '../visual/matrix.mjs';
+import { buildMatrix, mergeManifest, parseCaptureFilename } from '../visual/matrix.mjs';
 import { PINNED_CHROMIUM_BUILD, PINNED_PLAYWRIGHT_VERSION } from '../visual/pin.mjs';
 import { resolveOutDir } from '../visual/outpath.mjs';
 
@@ -152,7 +152,7 @@ async function main() {
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
 
   const failures = results.filter((r) => !r.ok);
-  const manifest = results.map((r) => {
+  const fresh = results.map((r) => {
     const parsed = parseCaptureFilename(r.filename);
     return {
       ...parsed,
@@ -167,15 +167,40 @@ async function main() {
   });
 
   const manifestPath = join(outDir, 'manifest.json');
-  await writeFile(manifestPath, `${JSON.stringify({
+  const meta = {
     generatedAt: new Date().toISOString(),
     playwrightVersion: PINNED_PLAYWRIGHT_VERSION,
-    chromiumBuild,
-    captureCount: results.length,
-    captures: manifest
-  }, null, 2)}\n`);
+    chromiumBuild
+  };
 
-  console.log(`visual-capture: wrote ${results.length} captures to ${args.out}/ in ${elapsed}s (chromium-${chromiumBuild}).`);
+  let manifest;
+  if (isSubset) {
+    // A subset run re-rendered only its own slice of the matrix. The manifest
+    // must MERGE: read the existing manifest, replace entries this run
+    // re-captured (matched by filename slot), and preserve every other effect's
+    // entries verbatim. Writing only the fresh slice here would silently drop
+    // the rest and shrink captureCount (the regression that left the baselines
+    // manifest holding just 12 metaballs entries instead of 120).
+    let existing = null;
+    try {
+      const raw = await readFile(manifestPath, 'utf8');
+      existing = JSON.parse(raw);
+    } catch {
+      // No prior manifest (or unreadable): treat as a fresh write.
+      existing = null;
+    }
+    manifest = mergeManifest(existing, fresh, meta);
+  } else {
+    // A full run replaces the whole manifest from scratch.
+    manifest = { ...meta, captureCount: fresh.length, captures: fresh };
+  }
+
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  const captureNote = isSubset
+    ? `wrote ${results.length} captures + merged manifest to ${manifest.captureCount} total`
+    : `wrote ${results.length} captures`;
+  console.log(`visual-capture: ${captureNote} to ${args.out}/ in ${elapsed}s (chromium-${chromiumBuild}).`);
   if (failures.length) {
     for (const failure of failures) {
       console.error(`  FAIL ${failure.filename}: ${failure.error || failure.pageErrors?.join('; ')}`);
