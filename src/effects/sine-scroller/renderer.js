@@ -59,8 +59,9 @@ export { DEFAULT_TEXT };
 //
 // TYPOGRAPHY SAFETY: baseline is chosen (via wave.baseline) and the amplitude /
 // font-size derived so the glyph ink stays inside [safeMargin, logicalHeight -
-// safeMargin] at every phase. Glyph heights (ascenders+descenders) are measured
-// from measureText() so the safe band accounts for the actual font.
+// safeMargin] at every phase. The per-glyph advance is measured once per resize
+// (measureText) so the path width reflects the real font; glyph heights are
+// conservatively the font size when computing the safe band in tests.
 export function createSineScrollerRenderer({ canvas, config }) {
   const output = getContext2D(canvas, { alpha: false });
   const buffer = createDrawingBuffer();
@@ -86,6 +87,13 @@ export function createSineScrollerRenderer({ canvas, config }) {
   // composition is unchanged; only lower-resolution buffers sample the same
   // composition into fewer pixels.
   let drawScale = 1;
+  // Measured per-glyph advances and the full text-path width. These depend ONLY
+  // on the font (family + weight + size) and the phrase, all of which are fixed
+  // between resizes, so they are measured ONCE in resize and reused every frame
+  // — measureText is not free on a real Canvas 2D backend, and calling it for
+  // every glyph every frame (158 calls/frame) is wasteful when nothing changed.
+  let advances = [];
+  let pathWidth = 1;
 
   function spawnStar(star, atRight = false) {
     star.x = atRight ? 1 : random();
@@ -100,6 +108,25 @@ export function createSineScrollerRenderer({ canvas, config }) {
       stars[index] = {};
       spawnStar(stars[index]);
     }
+  }
+
+  // Measure every glyph's advance and the total text-path width for the current
+  // font + phrase. Pure of viewport geometry beyond the font size; called once
+  // per resize so render() reuses the cached `advances` / `pathWidth`.
+  function measurePhrase(fontSize) {
+    context.font = `${config.appearance.fontWeight} ${fontSize}px ${config.appearance.fontFamily}`;
+    context.textBaseline = 'middle';
+    context.textAlign = 'left';
+    const content = config.text.content;
+    const measured = new Array(content.length);
+    let total = 0;
+    for (let index = 0; index < content.length; index++) {
+      const metrics = context.measureText(content[index]);
+      const advance = metrics.width || fontSize * config.text.characterWidthRatio;
+      measured[index] = advance;
+      total += advance;
+    }
+    return { advances: measured, pathWidth: Math.max(1, total) };
   }
 
   return {
@@ -122,6 +149,16 @@ export function createSineScrollerRenderer({ canvas, config }) {
       const count = resolveStarCount(config.stars, logicalWidth * logicalHeight);
       random = createSeededRandom(config.stars.seed);
       resetStars(count);
+
+      // Cache the measured per-glyph advances + path width for this font size.
+      // They depend only on font + phrase, both fixed between resizes.
+      const fontSize = Math.min(
+        config.text.fontSizeMax,
+        Math.max(config.text.fontSizeMin, shortSide * config.text.fontSizeRatio)
+      );
+      const phrase = measurePhrase(fontSize);
+      advances = phrase.advances;
+      pathWidth = phrase.pathWidth;
     },
     render({ time, delta }) {
       context.fillStyle = config.appearance.backgroundColor;
@@ -160,27 +197,11 @@ export function createSineScrollerRenderer({ canvas, config }) {
       context.textBaseline = 'middle';
       context.textAlign = 'left';
 
-      // Measure ACTUAL per-glyph advance so the path width and bounds reflect
-      // the real font (ascenders/descenders/spacing), not a fixed ratio. A
-      // uniform advance would drift on proportional fonts.
+      // Per-glyph advances + path width are measured once per resize (above) and
+      // reused here; measureText is not called per frame.
       const content = config.text.content;
-      const advances = new Array(content.length);
-      let pathWidth = 0;
-      let glyphHeight = fontSize;
-      for (let index = 0; index < content.length; index++) {
-        const metrics = context.measureText(content[index]);
-        const advance = metrics.width || fontSize * config.text.characterWidthRatio;
-        advances[index] = advance;
-        pathWidth += advance;
-        // actualBoundingBoxAscent/Descent give the real ink height when the
-        // platform reports them; fall back to the font size otherwise.
-        const ascent = metrics.actualBoundingBoxAscent || 0;
-        const descent = metrics.actualBoundingBoxDescent || 0;
-        const height = ascent + descent;
-        if (height > glyphHeight) glyphHeight = height;
-      }
-      if (glyphHeight <= 0) glyphHeight = fontSize;
-      pathWidth = Math.max(1, pathWidth);
+      const localAdvances = advances;
+      const localPathWidth = pathWidth;
 
       const baseline = logicalHeight * config.wave.baseline;
       const amplitude = shortSide * config.wave.amplitude;
@@ -190,11 +211,11 @@ export function createSineScrollerRenderer({ canvas, config }) {
       // modulo pathWidth so the phrase re-enters seamlessly.
       const scaledTime = time * config.motion.speed;
       const advance = scaledTime * config.motion.scrollSpeed * logicalWidth;
-      const offset = ((advance % pathWidth) + pathWidth) % pathWidth;
+      const offset = ((advance % localPathWidth) + localPathWidth) % localPathWidth;
 
       // How many copies of the phrase tile [0, logicalWidth] given the offset.
       // +1 on each side so glyphs entering/leaving are fully drawn (no pop).
-      const passes = Math.ceil((logicalWidth + pathWidth) / pathWidth) + 1;
+      const passes = Math.ceil((logicalWidth + localPathWidth) / localPathWidth) + 1;
 
       // WAVE PHASE advances with scaled time (radians per scaled-second).
       const phase = scaledTime * config.motion.phaseSpeed;
@@ -203,9 +224,9 @@ export function createSineScrollerRenderer({ canvas, config }) {
       const shadowOffsetY = config.text.shadowOffsetY * shortSide;
 
       for (let pass = 0; pass < passes; pass++) {
-        let cursor = pass * pathWidth - offset;
+        let cursor = pass * localPathWidth - offset;
         for (let index = 0; index < content.length; index++) {
-          const advanceGlyph = advances[index];
+          const advanceGlyph = localAdvances[index];
           const leftX = cursor;
           const centerX = cursor + advanceGlyph / 2;
           cursor += advanceGlyph;
@@ -215,7 +236,7 @@ export function createSineScrollerRenderer({ canvas, config }) {
           // does not change with canvas width or scroll position. `pass` tiles
           // the phrase; only the within-phrase fraction matters, so the wave
           // repeats identically on every tiled copy.
-          const t = (leftX + offset) / pathWidth - pass;
+          const t = (leftX + offset) / localPathWidth - pass;
           const pathFraction = t - Math.floor(t);
           const y = baseline + Math.sin(pathFraction * cycles2Pi + phase) * amplitude;
           context.globalAlpha = config.appearance.shadowAlpha;

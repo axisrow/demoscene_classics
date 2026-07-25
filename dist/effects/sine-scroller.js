@@ -727,6 +727,8 @@
     let bufferWidth = 1;
     let bufferHeight = 1;
     let drawScale = 1;
+    let advances = [];
+    let pathWidth = 1;
     function spawnStar(star, atRight = false) {
       star.x = atRight ? 1 : random();
       star.y = random();
@@ -740,6 +742,21 @@
         spawnStar(stars[index]);
       }
     }
+    function measurePhrase(fontSize) {
+      context.font = `${config.appearance.fontWeight} ${fontSize}px ${config.appearance.fontFamily}`;
+      context.textBaseline = "middle";
+      context.textAlign = "left";
+      const content = config.text.content;
+      const measured = new Array(content.length);
+      let total = 0;
+      for (let index = 0; index < content.length; index++) {
+        const metrics = context.measureText(content[index]);
+        const advance = metrics.width || fontSize * config.text.characterWidthRatio;
+        measured[index] = advance;
+        total += advance;
+      }
+      return { advances: measured, pathWidth: Math.max(1, total) };
+    }
     return {
       resize(nextWidth, nextHeight) {
         logicalWidth = Math.max(1, nextWidth / pixelRatio);
@@ -752,6 +769,13 @@
         const count = resolveStarCount(config.stars, logicalWidth * logicalHeight);
         random = createSeededRandom(config.stars.seed);
         resetStars(count);
+        const fontSize = Math.min(
+          config.text.fontSizeMax,
+          Math.max(config.text.fontSizeMin, shortSide * config.text.fontSizeRatio)
+        );
+        const phrase = measurePhrase(fontSize);
+        advances = phrase.advances;
+        pathWidth = phrase.pathWidth;
       },
       render({ time, delta }) {
         context.fillStyle = config.appearance.backgroundColor;
@@ -782,40 +806,27 @@
         context.textBaseline = "middle";
         context.textAlign = "left";
         const content = config.text.content;
-        const advances = new Array(content.length);
-        let pathWidth = 0;
-        let glyphHeight = fontSize;
-        for (let index = 0; index < content.length; index++) {
-          const metrics = context.measureText(content[index]);
-          const advance2 = metrics.width || fontSize * config.text.characterWidthRatio;
-          advances[index] = advance2;
-          pathWidth += advance2;
-          const ascent = metrics.actualBoundingBoxAscent || 0;
-          const descent = metrics.actualBoundingBoxDescent || 0;
-          const height = ascent + descent;
-          if (height > glyphHeight) glyphHeight = height;
-        }
-        if (glyphHeight <= 0) glyphHeight = fontSize;
-        pathWidth = Math.max(1, pathWidth);
+        const localAdvances = advances;
+        const localPathWidth = pathWidth;
         const baseline = logicalHeight * config.wave.baseline;
         const amplitude = shortSide * config.wave.amplitude;
         const scaledTime = time * config.motion.speed;
         const advance = scaledTime * config.motion.scrollSpeed * logicalWidth;
-        const offset = (advance % pathWidth + pathWidth) % pathWidth;
-        const passes = Math.ceil((logicalWidth + pathWidth) / pathWidth) + 1;
+        const offset = (advance % localPathWidth + localPathWidth) % localPathWidth;
+        const passes = Math.ceil((logicalWidth + localPathWidth) / localPathWidth) + 1;
         const phase = scaledTime * config.motion.phaseSpeed;
         const cycles2Pi = 2 * Math.PI * config.wave.cycles;
         const shadowOffsetX = config.text.shadowOffsetX * shortSide;
         const shadowOffsetY = config.text.shadowOffsetY * shortSide;
         for (let pass = 0; pass < passes; pass++) {
-          let cursor = pass * pathWidth - offset;
+          let cursor = pass * localPathWidth - offset;
           for (let index = 0; index < content.length; index++) {
-            const advanceGlyph = advances[index];
+            const advanceGlyph = localAdvances[index];
             const leftX = cursor;
             const centerX = cursor + advanceGlyph / 2;
             cursor += advanceGlyph;
             if (centerX < -advanceGlyph || centerX > logicalWidth + advanceGlyph) continue;
-            const t = (leftX + offset) / pathWidth - pass;
+            const t = (leftX + offset) / localPathWidth - pass;
             const pathFraction = t - Math.floor(t);
             const y = baseline + Math.sin(pathFraction * cycles2Pi + phase) * amplitude;
             context.globalAlpha = config.appearance.shadowAlpha;
