@@ -631,7 +631,7 @@
         const vpCssX = config.geometry.centerX * cssW;
         const vpCssY = config.geometry.centerY * cssH;
         const refR = Math.max(1, Math.min(vpCssX, cssW - vpCssX, vpCssY, cssH - vpCssY));
-        const cssToBuf = config.render.resolution;
+        const cssToBuf = pixelRatio * config.render.resolution;
         vpBufX = vpCssX * cssToBuf;
         vpBufY = vpCssY * cssToBuf;
         refRBuf = refR * cssToBuf;

@@ -83,11 +83,18 @@ export function createTunnelRenderer({ canvas, config }) {
       // vanishing point. Guards an off-edge vanishing point with max(1, ...).
       const refR = Math.max(1, Math.min(vpCssX, cssW - vpCssX, vpCssY, cssH - vpCssY));
 
-      // CSS -> buffer-pixel scale. This is the ONE place `render.resolution`
-      // enters the composition: it sets the sample count and the buffer-px
-      // scale of the (otherwise identical) geometry. It cancels out of every
-      // ratio used below (u, depth, polarAngle).
-      const cssToBuf = config.render.resolution;
+      // CSS -> buffer-pixel scale. The runtime resizes the canvas to DEVICE
+      // pixels (`nextWidth = cssExtent * pixelRatio`) and the sample buffer is
+      // `floor(nextWidth * render.resolution)`, so the buffer spans
+      // `pixelRatio * render.resolution` device px per CSS px. The geometry
+      // (vanishing point, reference radius, near-centre epsilon) must map from
+      // CSS px through that SAME scale, or a pixelRatio override (1.5/2) would
+      // displace the vanishing point toward the upper-left and shrink the
+      // composition — breaking the aspect/scale invariant. `render.resolution`
+      // and `pixelRatio` both cancel out of every ratio used below
+      // (u = rBuf/refRBuf, depth = epsBuf/rBuf, polarAngle), so the composition
+      // is still identical across sampling resolutions AND pixel ratios.
+      const cssToBuf = pixelRatio * config.render.resolution;
       vpBufX = vpCssX * cssToBuf;
       vpBufY = vpCssY * cssToBuf;
       refRBuf = refR * cssToBuf;

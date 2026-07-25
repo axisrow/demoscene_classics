@@ -304,6 +304,42 @@ test('the vanishing point stays centred regardless of resolution', () => {
   }
 });
 
+test('the vanishing point stays centred at every supported pixelRatio', () => {
+  // The runtime resizes the canvas to DEVICE pixels (cssExtent * pixelRatio) and
+  // hands those device dimensions to `resize()`. The renderer recovers the CSS
+  // viewport and must keep the vanishing point at the buffer centre for any
+  // supported pixelRatio (1, 1.5, 2). A pixelRatio-aware scale keeps the
+  // normalized geometry invariant; omitting pixelRatio displaces the vanishing
+  // point toward the upper-left and shrinks the composition.
+  function fogCentroid(cssW, cssH, pixelRatio) {
+    const deviceW = Math.round(cssW * pixelRatio);
+    const deviceH = Math.round(cssH * pixelRatio);
+    const m = mount(deviceW, deviceH, { runtime: { pixelRatio } });
+    m.renderer.render({ time: 0, delta: 0 });
+    const img = m.canvas.context.lastImage;
+    const w = m.canvas.context.lastImageWidth;
+    const h = m.canvas.context.lastImageHeight;
+    // Darkest pixels = most-fogged (the receding centre blends toward the dark
+    // navy fog). Their centroid must sit at the geometric buffer centre.
+    const lums = [];
+    for (let i = 0; i < img.length; i += 4) lums.push((img[i] + img[i + 1] + img[i + 2]) / 3);
+    const sorted = [...lums].sort((a, b) => a - b);
+    const thresh = sorted[Math.floor(lums.length * 0.05)];
+    let sx = 0, sy = 0, n = 0;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (lums[y * w + x] <= thresh) { sx += x; sy += y; n++; }
+      }
+    }
+    return [sx / n / w, sy / n / h];
+  }
+  for (const pr of [1, 1.5, 2]) {
+    const [fx, fy] = fogCentroid(300, 180, pr);
+    assert.ok(Math.abs(fx - 0.5) < 0.05, `centroid x ~0.5 at pixelRatio ${pr}: ${fx}`);
+    assert.ok(Math.abs(fy - 0.5) < 0.05, `centroid y ~0.5 at pixelRatio ${pr}: ${fy}`);
+  }
+});
+
 // --- fixed-step travel equivalence (24/30/60 FPS) --------------------------
 
 test('the same elapsed time at 24/30/60 FPS advances textureU identically', () => {
