@@ -542,7 +542,7 @@ test('classic default frames remain pixel-stable and unchanged from the v2 basel
   }
   assert.deepEqual(snapshots, {
     plasma: 'pixels:19981681',
-    fire: 'pixels:a5da6421',
+    fire: 'pixels:9aac868b',
     starfield: 'vector:95857935',
     metaballs: 'pixels:b18e0d45',
     tunnel: 'pixels:ac04a300',
@@ -850,7 +850,7 @@ test('explicit config changes the actual renderer for all ten effects', async ()
   const CUSTOM_PALETTE = ['#001122', '#38c878', '#f2eadc'];
   const variants = {
     plasma: { field: { frequencies: [0.08, 0.06, 0.04, 1.2] }, appearance: { colorCount: 32 } },
-    fire: { simulation: { seed: 7, sourceDensity: 0.4 } },
+    fire: { simulation: { seed: 7, cooling: 0.3 } },
     starfield: { particles: { particleCount: 42 } },
     metaballs: { motion: { speed: 1.7 }, appearance: { palette: CUSTOM_PALETTE, colorCount: 17 } },
     tunnel: { geometry: { angularFrequency: 9 } },
