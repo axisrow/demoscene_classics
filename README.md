@@ -1,5 +1,7 @@
 # Demoscene Classics
 
+🌍 **Live demo:** https://axisrow.github.io/demoscene_classics/
+
 Ten configurable demoscene effects distributed as ordinary browser scripts.
 The library owns effect algorithms, validation, scheduling and canvas
 rendering. Colours, density, motion and rendering budgets belong to the project
