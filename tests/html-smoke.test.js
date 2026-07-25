@@ -12,6 +12,10 @@ class Context {
   putImageData() {}
   drawImage() {}
   fillRect() {}
+  // sine-scroller queries per-glyph metrics; return deterministic stubs.
+  measureText() {
+    return { width: 10, actualBoundingBoxAscent: 7, actualBoundingBoxDescent: 2 };
+  }
   beginPath() {}
   moveTo() {}
   lineTo() {}

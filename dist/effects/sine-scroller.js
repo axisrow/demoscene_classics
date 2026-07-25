@@ -611,137 +611,75 @@
   }
   var SINE_PHASE_OFFSETS = [0, 2 * Math.PI / 3, 4 * Math.PI / 3];
 
-  // src/effects/sine-scroller/renderer.js
-  function createSineScrollerRenderer({ canvas, config }) {
-    const output = getContext2D(canvas, { alpha: false });
-    const buffer = createDrawingBuffer();
-    const context = buffer.context;
-    let random = createSeededRandom(config.stars.seed);
-    const palette = buildGradientPalette(
-      new Uint32Array(config.appearance.colorCount),
-      config.appearance.palette
-    );
-    const stars = Array.from({ length: config.stars.count }, () => ({}));
-    let width = 1;
-    let height = 1;
-    function resetStars() {
-      for (const star of stars) {
-        star.x = random() * width;
-        star.y = random() * height;
-        star.z = config.stars.minDepth + random() * (config.stars.maxDepth - config.stars.minDepth);
-        star.size = config.stars.minSize + random() * (config.stars.maxSize - config.stars.minSize);
-      }
-    }
-    return {
-      resize(nextWidth, nextHeight) {
-        width = nextWidth * config.render.resolution;
-        height = nextHeight * config.render.resolution;
-        resizeDrawingBuffer(buffer, width, height);
-        random = createSeededRandom(config.stars.seed);
-        resetStars();
-      },
-      render({ time, delta }) {
-        context.fillStyle = config.appearance.backgroundColor;
-        context.fillRect(0, 0, width, height);
-        for (const star of stars) {
-          star.x -= star.z * config.stars.speed * config.motion.speed * delta;
-          if (star.x < 0) {
-            star.x = width;
-            star.y = random() * height;
-          }
-          const depthRange = Math.max(Number.EPSILON, config.stars.maxDepth - config.stars.minDepth);
-          const normalized = (star.z - config.stars.minDepth) / depthRange;
-          const alpha = config.stars.minAlpha + normalized * (config.stars.maxAlpha - config.stars.minAlpha);
-          context.globalAlpha = alpha;
-          context.fillStyle = config.appearance.starColor;
-          context.fillRect(star.x, star.y, star.size, star.size);
-        }
-        context.globalAlpha = 1;
-        const fontSize = Math.min(config.text.maxFontSize, height * config.text.fontSizeRatio);
-        context.font = `${config.text.fontWeight} ${fontSize}px ${config.text.fontFamily}`;
-        context.textBaseline = "middle";
-        context.textAlign = "left";
-        const baseline = height * config.wave.baseline;
-        const amplitude = height * config.wave.amplitude;
-        const characterWidth = fontSize * config.text.characterWidthRatio;
-        const totalWidth = config.text.content.length * characterWidth;
-        const scaledTime = time * config.motion.speed;
-        const offset = scaledTime * config.motion.scrollSpeed % totalWidth;
-        const passes = Math.ceil((width + offset) / totalWidth) + 1;
-        const phase = scaledTime * config.motion.phaseSpeed;
-        for (let pass = 0; pass < passes; pass++) {
-          const startX = -offset + pass * totalWidth;
-          for (let index = 0; index < config.text.content.length; index++) {
-            const x = startX + index * characterWidth + characterWidth / 2;
-            if (x < -characterWidth || x > width + characterWidth) continue;
-            const y = baseline + Math.sin(x * config.wave.frequency + phase) * amplitude;
-            context.globalAlpha = config.appearance.shadowAlpha;
-            context.fillStyle = config.appearance.shadowColor;
-            context.fillText(
-              config.text.content[index],
-              x - fontSize * 0.5 + config.text.shadowOffsetX,
-              y + config.text.shadowOffsetY
-            );
-            const color = samplePackedPalette(
-              palette,
-              (index / config.text.content.length + scaledTime * config.motion.colorCycleSpeed) % 1
-            );
-            context.globalAlpha = 1;
-            context.fillStyle = `rgb(${color & 255},${color >>> 8 & 255},${color >>> 16 & 255})`;
-            context.fillText(config.text.content[index], x - fontSize * 0.5, y);
-          }
-        }
-        presentDrawingBuffer(output, buffer, canvas.width, canvas.height, config.render.smoothing);
-      }
-    };
-  }
-
   // src/effects/sine-scroller/config.js
   var DEFAULT_TEXT = "  GREETZ TO ALL DEMOSCENERS  ***  PLASMA  FIRE  METABALLS  TUNNEL  FRACTALS  ROTOZOOM  FEEDBACK  COPPER BARS  ***  JS DEMO PACK 2026  ***  KEEP IT REAL  ***  ";
   var SINE_SCROLLER_DEFAULTS = createEffectDefaults({
     render: { resolution: 1, smoothing: true },
-    motion: { speed: 1, scrollSpeed: 132, phaseSpeed: 3, colorCycleSpeed: 0.33 },
+    motion: { speed: 1, scrollSpeed: 0.18, phaseSpeed: 3, colorCycleSpeed: 0.33 },
     appearance: {
       palette: ["#78a0ff", "#70f0ff", "#f080ff", "#ffe66d", "#78a0ff"],
       colorCount: 360,
       backgroundColor: "#04040a",
       shadowColor: "#000000",
       shadowAlpha: 0.6,
-      starColor: "#78a0ff"
+      starColor: "#78a0ff",
+      // Font family/weight are VISUAL (skin-owned): they change how the phrase
+      // looks, not its layout geometry. Size, spacing, baseline, and the wave
+      // geometry stay in text/wave (config/profiles).
+      fontFamily: "Courier New, monospace",
+      fontWeight: 900
     },
     text: {
       content: DEFAULT_TEXT,
-      fontFamily: "Courier New, monospace",
-      fontWeight: 900,
-      fontSizeRatio: 0.13,
-      maxFontSize: 72,
+      fontSizeRatio: 0.16,
+      fontSizeMin: 10,
+      fontSizeMax: 96,
       characterWidthRatio: 0.62,
-      shadowOffsetX: 4,
-      shadowOffsetY: 4
+      outlineWidth: 0,
+      glowWidth: 0.02,
+      shadowOffsetX: 0.012,
+      shadowOffsetY: 0.012,
+      safeMargin: 0.04
     },
-    wave: { baseline: 0.62, amplitude: 0.12, frequency: 0.018 },
+    wave: { baseline: 0.62, amplitude: 0.06, cycles: 2.5 },
     stars: {
       seed: 1993,
       count: 220,
-      speed: 36,
+      densityMode: "explicit",
+      densityPerUnitArea: 0.45,
+      densityMin: 60,
+      densityMax: 1200,
+      speed: 0.06,
       minDepth: 0.2,
       maxDepth: 2.2,
-      minSize: 0.3,
-      maxSize: 1.9,
+      minSize: 15e-4,
+      maxSize: 6e-3,
       minAlpha: 0.3,
       maxAlpha: 1
     }
   });
+  function resolveStarCount(stars, area) {
+    if (stars.densityMode !== "area") return Math.min(stars.count, 5e3);
+    const derived = Math.round(stars.densityPerUnitArea * Math.max(0, area) / 1e3);
+    return Math.min(5e3, Math.min(stars.densityMax, Math.max(stars.densityMin, derived)));
+  }
   function validateSineScroller(config) {
-    for (const key of ["content", "fontFamily"]) assertString(config.text[key], `sineScroller.text.${key}`);
-    assertNumber(config.text.fontWeight, "sineScroller.text.fontWeight", { min: 100, max: 1e3, integer: true });
-    for (const key of ["fontSizeRatio", "maxFontSize", "characterWidthRatio"]) {
-      assertNumber(config.text[key], `sineScroller.text.${key}`, { min: Number.MIN_VALUE });
+    assertString(config.text.content, "sineScroller.text.content");
+    assertString(config.appearance.fontFamily, "sineScroller.appearance.fontFamily");
+    assertNumber(config.appearance.fontWeight, "sineScroller.appearance.fontWeight", { min: 100, max: 1e3, integer: true });
+    assertNumber(config.text.fontSizeRatio, "sineScroller.text.fontSizeRatio", { min: Number.MIN_VALUE, max: 1 });
+    assertNumber(config.text.fontSizeMin, "sineScroller.text.fontSizeMin", { min: 1, integer: true });
+    assertNumber(config.text.fontSizeMax, "sineScroller.text.fontSizeMax", {
+      min: config.text.fontSizeMin,
+      integer: true
+    });
+    assertNumber(config.text.characterWidthRatio, "sineScroller.text.characterWidthRatio", { min: Number.MIN_VALUE });
+    for (const key of ["outlineWidth", "glowWidth", "shadowOffsetX", "shadowOffsetY", "safeMargin"]) {
+      assertNumber(config.text[key], `sineScroller.text.${key}`, { min: 0, max: 1 });
     }
-    for (const key of ["shadowOffsetX", "shadowOffsetY"]) assertNumber(config.text[key], `sineScroller.text.${key}`);
     assertNumber(config.wave.baseline, "sineScroller.wave.baseline", { min: 0, max: 1 });
     assertNumber(config.wave.amplitude, "sineScroller.wave.amplitude", { min: 0, max: 1 });
-    assertNumber(config.wave.frequency, "sineScroller.wave.frequency", { min: Number.MIN_VALUE });
+    assertNumber(config.wave.cycles, "sineScroller.wave.cycles", { min: Number.MIN_VALUE });
     for (const key of ["scrollSpeed", "phaseSpeed", "colorCycleSpeed"]) {
       assertNumber(config.motion[key], `sineScroller.motion.${key}`);
     }
@@ -749,21 +687,185 @@
     assertString(config.appearance.shadowColor, "sineScroller.appearance.shadowColor");
     assertString(config.appearance.starColor, "sineScroller.appearance.starColor");
     assertNumber(config.stars.seed, "sineScroller.stars.seed", { min: 0, max: 4294967295, integer: true });
+    if (!["explicit", "area"].includes(config.stars.densityMode)) {
+      throw new RangeError(`sineScroller.stars.densityMode must be 'explicit' or 'area'.`);
+    }
     assertNumber(config.stars.count, "sineScroller.stars.count", { min: 0, max: 5e3, integer: true });
-    for (const key of ["speed", "minDepth", "maxDepth", "minSize", "maxSize", "minAlpha", "maxAlpha"]) {
+    assertNumber(config.stars.densityPerUnitArea, "sineScroller.stars.densityPerUnitArea", { min: 0 });
+    assertNumber(config.stars.densityMin, "sineScroller.stars.densityMin", { min: 0, max: 5e3, integer: true });
+    assertNumber(config.stars.densityMax, "sineScroller.stars.densityMax", {
+      min: config.stars.densityMin,
+      max: 5e3,
+      integer: true
+    });
+    for (const key of ["speed", "minDepth", "maxDepth", "minSize", "maxSize"]) {
       assertNumber(config.stars[key], `sineScroller.stars.${key}`, { min: 0 });
     }
+    assertNumber(config.stars.minAlpha, "sineScroller.stars.minAlpha", { min: 0, max: 1 });
+    assertNumber(config.stars.maxAlpha, "sineScroller.stars.maxAlpha", { min: 0, max: 1 });
     for (const [minimum, maximum] of [["minDepth", "maxDepth"], ["minSize", "maxSize"], ["minAlpha", "maxAlpha"]]) {
       if (config.stars[maximum] < config.stars[minimum]) {
         throw new RangeError(`sineScroller.stars.${maximum} must be at least ${minimum}.`);
       }
     }
-    if (config.stars.maxAlpha > 1) throw new RangeError("sineScroller.stars.maxAlpha must be at most 1.");
+  }
+
+  // src/effects/sine-scroller/renderer.js
+  function createSineScrollerRenderer({ canvas, config }) {
+    const output = getContext2D(canvas, { alpha: false });
+    const buffer = createDrawingBuffer();
+    const context = buffer.context;
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    const pixelRatio = config.runtime.pixelRatio;
+    let stars = [];
+    let random = createSeededRandom(config.stars.seed);
+    let logicalWidth = 1;
+    let logicalHeight = 1;
+    let shortSide = 1;
+    let bufferWidth = 1;
+    let bufferHeight = 1;
+    let drawScale = 1;
+    let advances = [];
+    let pathWidth = 1;
+    function spawnStar(star, atRight = false) {
+      star.x = atRight ? 1 : random();
+      star.y = random();
+      star.z = config.stars.minDepth + random() * (config.stars.maxDepth - config.stars.minDepth);
+      star.a = config.stars.minAlpha + random() * (config.stars.maxAlpha - config.stars.minAlpha);
+    }
+    function resetStars(count) {
+      stars = new Array(count);
+      for (let index = 0; index < count; index++) {
+        stars[index] = {};
+        spawnStar(stars[index]);
+      }
+    }
+    function measurePhrase(fontSize) {
+      context.font = `${config.appearance.fontWeight} ${fontSize}px ${config.appearance.fontFamily}`;
+      context.textBaseline = "middle";
+      context.textAlign = "left";
+      const content = config.text.content;
+      const measured = new Array(content.length);
+      let total = 0;
+      for (let index = 0; index < content.length; index++) {
+        const metrics = context.measureText(content[index]);
+        const advance = metrics.width || fontSize * config.text.characterWidthRatio;
+        measured[index] = advance;
+        total += advance;
+      }
+      return { advances: measured, pathWidth: Math.max(1, total) };
+    }
+    return {
+      resize(nextWidth, nextHeight) {
+        logicalWidth = Math.max(1, nextWidth / pixelRatio);
+        logicalHeight = Math.max(1, nextHeight / pixelRatio);
+        shortSide = Math.min(logicalWidth, logicalHeight);
+        bufferWidth = nextWidth * config.render.resolution;
+        bufferHeight = nextHeight * config.render.resolution;
+        resizeDrawingBuffer(buffer, bufferWidth, bufferHeight);
+        drawScale = config.render.resolution * pixelRatio;
+        const count = resolveStarCount(config.stars, logicalWidth * logicalHeight);
+        random = createSeededRandom(config.stars.seed);
+        resetStars(count);
+        const fontSize = Math.min(
+          config.text.fontSizeMax,
+          Math.max(config.text.fontSizeMin, shortSide * config.text.fontSizeRatio)
+        );
+        const phrase = measurePhrase(fontSize);
+        advances = phrase.advances;
+        pathWidth = phrase.pathWidth;
+      },
+      render({ time, delta }) {
+        context.fillStyle = config.appearance.backgroundColor;
+        context.fillRect(0, 0, bufferWidth, bufferHeight);
+        const depthRange = Math.max(Number.EPSILON, config.stars.maxDepth - config.stars.minDepth);
+        const baseDrift = config.stars.speed * config.motion.speed * delta / logicalWidth;
+        for (const star of stars) {
+          const depthFactor = (star.z - config.stars.minDepth) / depthRange;
+          const driftFactor = 1 - depthFactor;
+          star.x -= baseDrift * (0.4 + driftFactor);
+          if (star.x < 0) {
+            spawnStar(star, true);
+          }
+          const sx = star.x * logicalWidth;
+          const sy = star.y * logicalHeight;
+          const size = (config.stars.minSize + depthFactor * (config.stars.maxSize - config.stars.minSize)) * shortSide;
+          context.globalAlpha = star.a;
+          context.fillStyle = config.appearance.starColor;
+          const sz = Math.max(1, size * drawScale);
+          context.fillRect(sx * drawScale, sy * drawScale, sz, sz);
+        }
+        context.globalAlpha = 1;
+        const fontSize = Math.min(
+          config.text.fontSizeMax,
+          Math.max(config.text.fontSizeMin, shortSide * config.text.fontSizeRatio)
+        );
+        context.font = `${config.appearance.fontWeight} ${fontSize * drawScale}px ${config.appearance.fontFamily}`;
+        context.textBaseline = "middle";
+        context.textAlign = "left";
+        const content = config.text.content;
+        const localAdvances = advances;
+        const localPathWidth = pathWidth;
+        const baseline = logicalHeight * config.wave.baseline;
+        const amplitude = shortSide * config.wave.amplitude;
+        const scaledTime = time * config.motion.speed;
+        const advance = scaledTime * config.motion.scrollSpeed * logicalWidth;
+        const offset = (advance % localPathWidth + localPathWidth) % localPathWidth;
+        const passes = Math.ceil((logicalWidth + localPathWidth) / localPathWidth) + 1;
+        const phase = scaledTime * config.motion.phaseSpeed;
+        const cycles2Pi = 2 * Math.PI * config.wave.cycles;
+        const shadowOffsetX = config.text.shadowOffsetX * shortSide;
+        const shadowOffsetY = config.text.shadowOffsetY * shortSide;
+        for (let pass = 0; pass < passes; pass++) {
+          let cursor = pass * localPathWidth - offset;
+          for (let index = 0; index < content.length; index++) {
+            const advanceGlyph = localAdvances[index];
+            const leftX = cursor;
+            const centerX = cursor + advanceGlyph / 2;
+            cursor += advanceGlyph;
+            if (centerX < -advanceGlyph || centerX > logicalWidth + advanceGlyph) continue;
+            const t = (leftX + offset) / localPathWidth - pass;
+            const pathFraction = t - Math.floor(t);
+            const y = baseline + Math.sin(pathFraction * cycles2Pi + phase) * amplitude;
+            context.globalAlpha = config.appearance.shadowAlpha;
+            context.fillStyle = config.appearance.shadowColor;
+            context.fillText(
+              content[index],
+              (leftX + shadowOffsetX) * drawScale,
+              (y + shadowOffsetY) * drawScale
+            );
+            const color = samplePackedPalette(
+              palette,
+              (index / content.length + scaledTime * config.motion.colorCycleSpeed) % 1
+            );
+            context.globalAlpha = 1;
+            context.fillStyle = `rgb(${color & 255},${color >>> 8 & 255},${color >>> 16 & 255})`;
+            context.fillText(content[index], leftX * drawScale, y * drawScale);
+          }
+        }
+        context.globalAlpha = 1;
+        presentDrawingBuffer(output, buffer, canvas.width, canvas.height, config.render.smoothing);
+      }
+    };
   }
 
   // src/effects/sine-scroller/skins.js
   var SINE_SCROLLER_SKINS = Object.freeze({
-    classic: Object.freeze({})
+    classic: Object.freeze({
+      appearance: Object.freeze({
+        backgroundColor: "#04040a",
+        palette: Object.freeze(["#78a0ff", "#70f0ff", "#f080ff", "#ffe66d", "#78a0ff"]),
+        colorCount: 360,
+        shadowColor: "#000000",
+        shadowAlpha: 0.6,
+        starColor: "#78a0ff",
+        fontFamily: "Courier New, monospace",
+        fontWeight: 900
+      })
+    })
   });
 
   // src/effects/profiles.js
@@ -818,12 +920,34 @@
   var RUNTIME_FULLSCREEN_MOBILE = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_BUDGET = { render: { resolution: 0.7 }, stars: { count: 60 } };
+  var GEOMETRY_DESKTOP = {
+    text: { fontSizeRatio: 0.16, fontSizeMax: 96, safeMargin: 0.04 },
+    wave: { baseline: 0.62, amplitude: 0.06 },
+    motion: { scrollSpeed: 0.18 }
+  };
+  var STARS_DESKTOP = {
+    stars: { densityMode: "explicit", count: 220 }
+  };
+  var GEOMETRY_MOBILE = {
+    text: { fontSizeRatio: 0.14, fontSizeMax: 64, safeMargin: 0.06 },
+    wave: { baseline: 0.6, amplitude: 0.045 },
+    motion: { scrollSpeed: 0.18 }
+  };
+  var STARS_MOBILE = {
+    stars: { densityMode: "area", densityPerUnitArea: 0.45, densityMin: 80, densityMax: 320 }
+  };
+  var PREVIEW_RENDER = { render: { resolution: 0.7 } };
+  var STARS_PREVIEW_DESKTOP = {
+    stars: { densityMode: "explicit", count: 90 }
+  };
+  var STARS_PREVIEW_MOBILE = {
+    stars: { densityMode: "area", densityPerUnitArea: 0.4, densityMin: 40, densityMax: 140 }
+  };
   var SINE_SCROLLER_PROFILES = buildProfiles({
-    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP },
-    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP, ...PREVIEW_BUDGET },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE, ...PREVIEW_BUDGET }
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP, ...GEOMETRY_DESKTOP, ...STARS_DESKTOP },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE, ...GEOMETRY_MOBILE, ...STARS_MOBILE },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP, ...GEOMETRY_DESKTOP, ...STARS_PREVIEW_DESKTOP, ...PREVIEW_RENDER },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE, ...GEOMETRY_MOBILE, ...STARS_PREVIEW_MOBILE, ...PREVIEW_RENDER }
   });
 
   // src/effects/sine-scroller/index.js
