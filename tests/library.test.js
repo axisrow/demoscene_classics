@@ -530,21 +530,19 @@ test('legacy v2 flat options fail everywhere with an actionable migration messag
 });
 
 // Every effect's default descriptor (classic/fullscreen/desktop) must render a
-// stable, frozen signature. Eight of the ten are still byte-identical to the v2
-// baseline. Starfield was normalized in #7 (aspect-correct projection, viewport
-// visibility culling, density budgets) and tunnel was normalized in #9
-// (aspect-correct normalized polar coordinates, guarded bounded-inverse depth,
-// meaningful fog), so each moved off its v2 value and is pinned to its
-// normalized composition below. The effect-specific suites
-// (tests/starfield.test.js, tests/tunnel.test.js) cover the normalized
-// behavior in depth.
+// stable, frozen signature. Six of the ten are still byte-identical to the v2
+// baseline; starfield (#7), plasma (#5), fire (#6), and tunnel (#9) were each
+// normalized, so their signatures moved off the v2 values and are now pinned to
+// their normalized compositions below. The effect-specific suites
+// (tests/starfield.test.js, tests/plasma.test.js, tests/tunnel.test.js) cover
+// the normalized behavior in depth.
 test('classic default frames remain pixel-stable and unchanged from the v2 baseline', async () => {
   const snapshots = {};
   for (const [name, , , filename] of EFFECTS) {
     snapshots[name] = await rendererSignature(name, filename);
   }
   assert.deepEqual(snapshots, {
-    plasma: 'pixels:19981681',
+    plasma: 'pixels:7c2263af',
     fire: 'pixels:9aac868b',
     starfield: 'vector:95857935',
     metaballs: 'pixels:b18e0d45',
