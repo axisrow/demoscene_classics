@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   buildMatrix,
+  captureEntryKey,
   captureFilename,
   EFFECT_NAMES,
   EXPECTED_CAPTURE_COUNT,
   EXPECTED_CASE_COUNT,
+  mergeManifest,
   parseCaptureFilename,
   stepCountForTimestamp,
   STEP_SECONDS,
@@ -145,4 +147,148 @@ test('every case carries the four-profile geometry independent of render resolut
     [...dims].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })),
     ['320x180', '360x180', '390x844', '1280x720']
   );
+});
+
+// --- manifest subset-merge ------------------------------------------------
+// Regression guard for the #27 bug: a `--effect <name>` subset capture
+// re-renders only that effect's 12 frames but must MERGE into the existing
+// manifest, preserving every other effect's entries and the true captureCount.
+// These tests exercise the pure merge function the orchestrator now calls, so
+// they run without launching a browser.
+
+function buildManifestEntry(capture, overrides = {}) {
+  return {
+    ...parseCaptureFilename(capture.filename),
+    file: `visual/baselines/${capture.filename}`,
+    sha256: '0'.repeat(64),
+    size: 1000,
+    selection: { preset: 'classic' },
+    steps: capture.steps,
+    chromiumBuild: '1217',
+    playwrightVersion: '1.59.0',
+    ...overrides
+  };
+}
+
+test('captureEntryKey keys a manifest entry by its filename slot', () => {
+  const entry = { file: 'visual/baselines/plasma__desktop-preview__320x180__desktop__0s.png' };
+  assert.equal(captureEntryKey(entry), 'plasma__desktop-preview__320x180__desktop__0s.png');
+  // The key ignores the directory prefix: a baseline and a capture of the same
+  // slot share a key even though their `file` paths differ.
+  const captureEntry = { file: 'visual/captures/plasma__desktop-preview__320x180__desktop__0s.png' };
+  assert.equal(captureEntryKey(captureEntry), captureEntryKey(entry));
+  assert.equal(captureEntryKey({}), null);
+  assert.equal(captureEntryKey(null), null);
+});
+
+test('mergeManifest: subset update replaces only the re-rendered effect, keeps the rest', () => {
+  // A complete, healthy manifest covering all 120 slots.
+  const all = buildMatrix().captures.map((c) => buildManifestEntry(c, { sha256: 'aaaa' }));
+  const existing = {
+    generatedAt: '2026-07-25T00:00:00.000Z',
+    playwrightVersion: '1.59.0',
+    chromiumBuild: '1217',
+    captureCount: all.length,
+    captures: all
+  };
+
+  // A subset run re-rendered metaballs (12 frames) with new checksums.
+  const fresh = buildMatrix().captures
+    .filter((c) => c.effectName === 'metaballs')
+    .map((c) => buildManifestEntry(c, { sha256: 'bbbb' }));
+
+  const merged = mergeManifest(existing, fresh, {
+    generatedAt: '2026-07-26T00:00:00.000Z',
+    playwrightVersion: '1.59.0',
+    chromiumBuild: '1217'
+  });
+
+  // captureCount must stay at the full matrix size, NOT collapse to 12.
+  assert.equal(merged.captureCount, EXPECTED_CAPTURE_COUNT);
+  assert.equal(merged.captures.length, EXPECTED_CAPTURE_COUNT);
+
+  // metaballs entries were replaced (new sha256); every other effect untouched.
+  for (const entry of merged.captures) {
+    const expected = entry.effectName === 'metaballs' ? 'bbbb' : 'aaaa';
+    assert.equal(entry.sha256, expected, `wrong checksum for ${entry.file}`);
+  }
+  // All ten effects are still present.
+  assert.deepEqual(
+    [...new Set(merged.captures.map((c) => c.effectName))].sort(),
+    [...EFFECT_NAMES].sort()
+  );
+  // Top-level scalars were stamped.
+  assert.equal(merged.generatedAt, '2026-07-26T00:00:00.000Z');
+  assert.equal(merged.chromiumBuild, '1217');
+});
+
+test('mergeManifest: subset update preserves the original entry order', () => {
+  const all = buildMatrix().captures.map((c) => buildManifestEntry(c));
+  const existing = { captureCount: all.length, captures: all };
+  const fresh = buildMatrix().captures
+    .filter((c) => c.effectName === 'metaballs')
+    .map((c) => buildManifestEntry(c, { sha256: 'new' }));
+
+  const merged = mergeManifest(existing, fresh, {
+    generatedAt: 't',
+    playwrightVersion: '1.59.0',
+    chromiumBuild: '1217'
+  });
+
+  // Replaced entries stay in their original positions; no reordering.
+  const originalFiles = all.map((c) => c.file);
+  const mergedFiles = merged.captures.map((c) => c.file);
+  assert.deepEqual(mergedFiles, originalFiles);
+});
+
+test('mergeManifest: subset run appends slots that did not previously exist', () => {
+  // An existing manifest holding only plasma (e.g. a prior subset run, or a
+  // partially-populated dir). A metaballs subset run must ADD its 12 frames
+  // without dropping plasma.
+  const plasma = buildMatrix().captures
+    .filter((c) => c.effectName === 'plasma')
+    .map((c) => buildManifestEntry(c));
+  const existing = { captureCount: plasma.length, captures: plasma };
+  const fresh = buildMatrix().captures
+    .filter((c) => c.effectName === 'metaballs')
+    .map((c) => buildManifestEntry(c));
+
+  const merged = mergeManifest(existing, fresh, {
+    generatedAt: 't',
+    playwrightVersion: '1.59.0',
+    chromiumBuild: '1217'
+  });
+
+  assert.equal(merged.captureCount, plasma.length + fresh.length);
+  const effects = new Set(merged.captures.map((c) => c.effectName));
+  assert.equal(effects.size, 2);
+  assert.ok(effects.has('plasma'));
+  assert.ok(effects.has('metaballs'));
+});
+
+test('mergeManifest: null/missing existing manifest behaves like a fresh write', () => {
+  const fresh = buildMatrix().captures
+    .filter((c) => c.effectName === 'plasma')
+    .map((c) => buildManifestEntry(c));
+
+  const merged = mergeManifest(null, fresh, {
+    generatedAt: 't',
+    playwrightVersion: '1.59.0',
+    chromiumBuild: '1217'
+  });
+  assert.equal(merged.captureCount, fresh.length);
+  assert.deepEqual(merged.captures, fresh);
+});
+
+test('mergeManifest: degenerate duplicate filenames in existing manifest are de-duplicated', () => {
+  // A corrupt prior manifest carrying a duplicate slot must not double-count.
+  const one = buildManifestEntry(buildMatrix().captures[0]);
+  const existing = { captureCount: 2, captures: [one, { ...one }] };
+  const merged = mergeManifest(existing, [], {
+    generatedAt: 't',
+    playwrightVersion: '1.59.0',
+    chromiumBuild: '1217'
+  });
+  assert.equal(merged.captureCount, 1);
+  assert.equal(merged.captures.length, 1);
 });
