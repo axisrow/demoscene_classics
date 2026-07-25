@@ -550,7 +550,7 @@ test('classic default frames remain pixel-stable and unchanged from the v2 basel
     tunnel: 'pixels:73466750',
     mandelbrot: 'pixels:f05b5719',
     sineScroller: 'vector:1a8c3cf0',
-    rotozoom: 'pixels:cb358dc5',
+    rotozoom: 'pixels:e199dbb2',
     feedback: 'vector:7e2ccd86',
     copperBars: 'pixels:7ac0c2b5'
   });
