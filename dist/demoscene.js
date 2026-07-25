@@ -3028,26 +3028,19 @@ void main() {
           resetContextState(context);
           context.globalAlpha = config.feedback.decayPerSecond ** frameFactor;
           context.globalCompositeOperation = "source-over";
-          context.save();
-          context.translate(width / 2, height / 2);
-          context.rotate(config.feedback.rotationPerSecond * frameFactor);
-          const frameScale = config.feedback.scalePerSecond ** frameFactor;
-          context.scale(frameScale, frameScale);
-          context.translate(-width / 2, -height / 2);
           context.drawImage(read.canvas, 0, 0);
-          context.restore();
           resetContextState(context);
         }
         const scaledTime = time * config.motion.speed;
         const centerX = (pointerX ?? 0.5 + Math.cos(scaledTime * config.motion.orbitSpeedX) * config.geometry.orbitX * 0.5) * width;
         const centerY = (pointerY ?? 0.5 + Math.sin(scaledTime * config.motion.orbitSpeedY) * config.geometry.orbitY * 0.5) * height;
-        const radius = (config.geometry.radius + Math.sin(scaledTime * config.geometry.radiusOscillationSpeed) * config.geometry.radiusOscillation) * shortSide;
+        const radius = (config.geometry.radius + Math.sin(scaledTime * config.geometry.radiusOscillationSpeed) * config.geometry.radiusOscillation) * config.feedback.scalePerSecond ** (time * config.motion.speed) * shortSide;
         context.globalCompositeOperation = "lighter";
         for (let pass = 0; pass < config.geometry.passes; pass++) {
           context.beginPath();
           const passRadius = radius + pass * config.geometry.passSpacing * shortSide;
           for (let point = 0; point <= config.geometry.sides; point++) {
-            const angle = point / config.geometry.sides * Math.PI * 2 + scaledTime * (config.motion.polygonRotationSpeed + pass * config.motion.passRotationStep);
+            const angle = point / config.geometry.sides * Math.PI * 2 + scaledTime * (config.motion.polygonRotationSpeed + config.feedback.rotationPerSecond + pass * config.motion.passRotationStep);
             const x = centerX + Math.cos(angle) * passRadius;
             const y = centerY + Math.sin(angle) * passRadius;
             if (point === 0) context.moveTo(x, y);
@@ -3113,13 +3106,18 @@ void main() {
     },
     feedback: {
       // Fraction of the previous frame's luminance retained after one second of
-      // decay. Exponentiated by `delta` per step, so persistence is comparable
-      // across FPS schedules. Below 1 this strictly bounds accumulation: a pixel
-      // can never grow brighter than its source contributions allow.
+      // decay. Exponentiated by `delta` per step on the IDENTITY read-back, so
+      // persistence is comparable across FPS schedules. Below 1 this strictly
+      // bounds accumulation: a pixel can never grow brighter than its source
+      // contributions allow.
       decayPerSecond: 0.45,
-      // Scale of the previous frame after one second of zoom (per-second).
+      // Per-second zoom of the polygon ring, applied as a pure function of `time`
+      // to the geometry (NOT to the read-back, which stays identity to avoid
+      // amplifying cross-OS AA drift). Bounded in (0, 1] so the ring eases inward
+      // without runaway accumulation.
       scalePerSecond: 0.9,
-      // Rotation applied to the previous frame over one second, in radians.
+      // Per-second rotation of the polygon pattern, in radians, applied as a pure
+      // function of `time` to the geometry (NOT to the read-back).
       rotationPerSecond: 0.7,
       // How much of the dim background tint survives into the next frame, in
       // [0, 1]. Bounds the darkest the trail can settle to without forcing an

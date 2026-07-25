@@ -561,9 +561,9 @@ test('legacy v2 flat options fail everywhere with an actionable migration messag
 // Every effect's default descriptor (classic/fullscreen/desktop) must render a
 // stable, frozen signature. Four of the ten are still byte-identical to the v2
 // baseline; starfield (#7), plasma (#5), fire (#6), tunnel (#9), copperBars
-// (#14), and sineScroller (#11) were each normalized/refined, so their
-// signatures moved off the v2 values and are now pinned to their normalized
-// compositions below. The effect-specific suites (tests/starfield.test.js,
+// (#14), sineScroller (#11), and feedback (#13) were each normalized/refined,
+// so their signatures moved off the v2 values and are now pinned to their
+// normalized compositions below. The effect-specific suites (tests/starfield.test.js,
 // tests/plasma.test.js, tests/fire-simulation.test.js, tests/tunnel.test.js,
 // tests/copper-bars.test.js, tests/sine-scroller.test.js) cover the normalized
 // behavior in depth.
@@ -581,7 +581,7 @@ test('classic default frames remain pixel-stable and unchanged from the v2 basel
     mandelbrot: 'pixels:f05b5719',
     sineScroller: 'vector:5279a7a7',
     rotozoom: 'pixels:e199dbb2',
-    feedback: 'vector:8ee02c0d',
+    feedback: 'vector:9e2822cd',
     copperBars: 'pixels:7ac0c2b5'
   });
 });

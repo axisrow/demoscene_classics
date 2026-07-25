@@ -55,13 +55,18 @@ export const FEEDBACK_DEFAULTS = createEffectDefaults({
   },
   feedback: {
     // Fraction of the previous frame's luminance retained after one second of
-    // decay. Exponentiated by `delta` per step, so persistence is comparable
-    // across FPS schedules. Below 1 this strictly bounds accumulation: a pixel
-    // can never grow brighter than its source contributions allow.
+    // decay. Exponentiated by `delta` per step on the IDENTITY read-back, so
+    // persistence is comparable across FPS schedules. Below 1 this strictly
+    // bounds accumulation: a pixel can never grow brighter than its source
+    // contributions allow.
     decayPerSecond: 0.45,
-    // Scale of the previous frame after one second of zoom (per-second).
+    // Per-second zoom of the polygon ring, applied as a pure function of `time`
+    // to the geometry (NOT to the read-back, which stays identity to avoid
+    // amplifying cross-OS AA drift). Bounded in (0, 1] so the ring eases inward
+    // without runaway accumulation.
     scalePerSecond: 0.9,
-    // Rotation applied to the previous frame over one second, in radians.
+    // Per-second rotation of the polygon pattern, in radians, applied as a pure
+    // function of `time` to the geometry (NOT to the read-back).
     rotationPerSecond: 0.7,
     // How much of the dim background tint survives into the next frame, in
     // [0, 1]. Bounds the darkest the trail can settle to without forcing an
