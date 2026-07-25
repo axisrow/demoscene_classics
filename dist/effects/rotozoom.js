@@ -561,13 +561,6 @@
   function packRgb(red, green, blue) {
     return 255 << 24 | (blue | 0) << 16 | (green | 0) << 8 | (red | 0);
   }
-  function samplePackedPalette(palette, normalized) {
-    const index = Math.min(
-      palette.length - 1,
-      Math.max(0, Math.round(normalized * (palette.length - 1)))
-    );
-    return palette[index];
-  }
   function parseHexColor(value, label = "color") {
     if (typeof value !== "string") {
       throw new TypeError(`Demoscene ${label} must be a hex color string.`);
@@ -613,64 +606,74 @@
       new Uint32Array(config.appearance.colorCount),
       config.appearance.palette
     );
-    const texture = buildTexture(config, palette);
-    const textureSize = config.texture.size;
+    const { motion, render, appearance, transform, texture } = config;
+    const paletteLen = palette.length;
+    const twoPi = Math.PI * 2;
+    const fU = texture.frequencyU * twoPi;
+    const fV = texture.frequencyV * twoPi;
+    const fD = texture.frequencyU * twoPi;
+    const wSum = texture.weightU + texture.weightV + texture.weightDiag || 1;
+    const wU = texture.weightU / wSum;
+    const wV = texture.weightV / wSum;
+    const wD = texture.weightDiag / wSum;
+    const tiles = texture.tiles;
+    const aspectCorrection = transform.aspectCorrection;
+    const cx = transform.centerX;
+    const cy = transform.centerY;
+    const contrast = Number.isFinite(appearance.contrast) && appearance.contrast > 0 ? appearance.contrast : 1;
     let width = 1;
     let height = 1;
+    function textureValue(tu, tv) {
+      const horizontal = Math.sin(fU * tu);
+      const vertical = Math.sin(fV * tv);
+      const diagonal = Math.sin(fD * (tu + tv));
+      let value = horizontal * wU + vertical * wV + diagonal * wD;
+      value = value * 0.5 + 0.5;
+      if (contrast !== 1 && value > 0) {
+        value = Math.pow(value, contrast);
+      }
+      return value;
+    }
     return {
       resize(nextWidth, nextHeight) {
         width = nextWidth;
         height = nextHeight;
-        resizePixelBuffer(buffer, width * config.render.resolution, height * config.render.resolution);
+        resizePixelBuffer(buffer, width * render.resolution, height * render.resolution);
       },
       render({ time }) {
-        const scaledTime = time * config.motion.speed;
-        const angle = scaledTime * config.motion.rotationSpeed;
+        const scaledTime = time * motion.speed;
+        const angle = scaledTime * motion.rotationSpeed * twoPi;
         const zoom = Math.max(
-          0.01,
-          config.motion.zoomBase + Math.sin(scaledTime * config.motion.zoomSpeed) * config.motion.zoomAmplitude
+          motion.zoomMin,
+          motion.zoomBase + Math.sin(scaledTime * motion.zoomSpeed) * motion.zoomAmplitude
         );
         const inverseZoom = 1 / zoom;
         const cosine = Math.cos(angle);
         const sine = Math.sin(angle);
-        const centerX = buffer.width / 2;
-        const centerY = buffer.height / 2;
+        const w = buffer.width;
+        const h = buffer.height;
+        const aspect = w / h;
+        const aspectU = aspectCorrection ? aspect : 1;
+        const paletteLocal = palette;
+        const len = paletteLen;
         let index = 0;
-        for (let y = 0; y < buffer.height; y++) {
-          const dy = y - centerY;
-          for (let x = 0; x < buffer.width; x++) {
-            const dx = x - centerX;
-            const rotatedX = (cosine * dx + sine * dy) * inverseZoom;
-            const rotatedY = (-sine * dx + cosine * dy) * inverseZoom;
-            const textureX = Math.floor(rotatedX + textureSize / 2) % textureSize;
-            const textureY = Math.floor(rotatedY + textureSize / 2) % textureSize;
-            const wrappedX = (textureX + textureSize) % textureSize;
-            const wrappedY = (textureY + textureSize) % textureSize;
-            buffer.pixels[index++] = texture[wrappedY * textureSize + wrappedX];
+        for (let y = 0; y < h; y++) {
+          const ny = (y + 0.5) / h - cy;
+          for (let x = 0; x < w; x++) {
+            const nx = (x + 0.5) / w - cx;
+            const pxA = nx * aspectU;
+            const rx = (cosine * pxA + sine * ny) * inverseZoom;
+            const ry = (-sine * pxA + cosine * ny) * inverseZoom;
+            const tu = rx * tiles - Math.floor(rx * tiles);
+            const tv = ry * tiles - Math.floor(ry * tiles);
+            const value = textureValue(tu, tv);
+            const fieldIndex = value <= 0 ? 0 : value >= 1 ? len - 1 : value * len | 0;
+            buffer.pixels[index++] = paletteLocal[fieldIndex];
           }
         }
-        presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
+        presentPixelBuffer(context, buffer, width, height, render.smoothing);
       }
     };
-  }
-  function buildTexture(config, palette) {
-    const size = config.texture.size;
-    const texture = new Uint32Array(size * size);
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const checker = (Math.floor(x / config.texture.checkerSize) + Math.floor(y / config.texture.checkerSize) & 1) === 0;
-        const centerX = x - size / 2;
-        const centerY = y - size / 2;
-        const radius = Math.sqrt(centerX * centerX + centerY * centerY);
-        const rings = Math.sin(radius * config.texture.ringFrequency) * 0.5 + 0.5;
-        const spokes = Math.sin(Math.atan2(centerY, centerX) * config.texture.spokeCount) * 0.5 + 0.5;
-        let position = checker ? rings * 0.4 : 0.4 + spokes * 0.4;
-        if (radius < config.texture.centerRadius) position = 0.85;
-        else if (radius < config.texture.borderRadius) position = 1;
-        texture[y * size + x] = samplePackedPalette(palette, position);
-      }
-    }
-    return texture;
   }
 
   // src/effects/rotozoom/config.js
@@ -678,41 +681,107 @@
     render: { resolution: 0.5, smoothing: true },
     motion: {
       speed: 1,
-      rotationSpeed: 0.8,
-      zoomBase: 1.2,
-      zoomAmplitude: 0.7,
-      zoomSpeed: 0.5
+      // Rotation in TURNS PER SECOND (one turn = 2π). Time-based, so the angle at
+      // elapsed time t is speed·rotationSpeed·t regardless of FPS.
+      rotationSpeed: 0.12,
+      // Zoom is a bounded time-based sinusoid: zoomBase ± zoomAmplitude, clamped
+      // to [zoomMin, ∞). It never touches frame count or buffer size.
+      zoomBase: 1,
+      zoomAmplitude: 0.55,
+      zoomSpeed: 0.28,
+      zoomMin: 0.25
     },
     appearance: {
-      palette: ["#141e28", "#284d68", "#d47832", "#f0b050", "#00f0c8", "#000000"],
-      colorCount: 256,
-      backgroundColor: "#000000"
+      // `contrast` is an appearance-only gamma applied to the normalized texture
+      // value before palette lookup (see renderer.js). The classic skin overrides
+      // it; the default here is a neutral 1.0 (no reshaping).
+      contrast: 1
+    },
+    transform: {
+      // Centre of rotation/zoom in normalized viewport [0,1]². (0.5, 0.5) is the
+      // geometric centre. A documented landmark — not derived from buffer pixels.
+      centerX: 0.5,
+      centerY: 0.5,
+      // Correct the horizontal axis by the viewport aspect so the tile motif
+      // stays square (not stretched) across landscape and portrait.
+      aspectCorrection: true
     },
     texture: {
-      size: 256,
-      checkerSize: 32,
-      ringFrequency: 0.12,
-      spokeCount: 8,
-      centerRadius: 26,
-      borderRadius: 30
+      // Number of whole texture tiles repeated across one viewport HEIGHT. The
+      // transform maps viewport units to texture-tile units by `tiles`, so the
+      // tile scale depends on viewport extent (a composition choice), never on
+      // backing-buffer pixels. Capped at 50: beyond that, per-tile sampling on
+      // the smallest preview buffer (320x180) undersamples the lattice into
+      // moiré or a near-flat wash — exactly what issue #12 asks the texture to
+      // avoid.
+      tiles: 5,
+      // INTEGER cycle counts of the sine lattice across one tile. Integer counts
+      // guarantee seamlessness at the tile wrap. Two near-odd coprime frequencies
+      // produce a diagonal interference lattice that reads at many orientations
+      // without a dominant centre.
+      frequencyU: 3,
+      frequencyV: 2,
+      // Relative weight of the three lattice components: horizontal, vertical,
+      // and the diagonal sum (u+v). All in [0,1]; they shape the motif only.
+      weightU: 1,
+      weightV: 1,
+      weightDiag: 0.6
     }
   });
   function validateRotozoom(config) {
-    for (const key of ["rotationSpeed", "zoomAmplitude", "zoomSpeed"]) {
-      assertNumber(config.motion[key], `rotozoom.motion.${key}`);
+    for (const key of ["rotationSpeed", "zoomSpeed", "zoomAmplitude"]) {
+      assertNumber(config.motion[key], `rotozoom.motion.${key}`, { min: 0 });
     }
-    assertNumber(config.motion.zoomBase, "rotozoom.motion.zoomBase", { min: Number.MIN_VALUE });
-    assertNumber(config.texture.size, "rotozoom.texture.size", { min: 16, max: 1024, integer: true });
-    assertNumber(config.texture.checkerSize, "rotozoom.texture.checkerSize", { min: 1, max: 512, integer: true });
-    assertNumber(config.texture.ringFrequency, "rotozoom.texture.ringFrequency", { min: 0 });
-    assertNumber(config.texture.spokeCount, "rotozoom.texture.spokeCount", { min: 1, max: 64, integer: true });
-    assertNumber(config.texture.centerRadius, "rotozoom.texture.centerRadius", { min: 0 });
-    assertNumber(config.texture.borderRadius, "rotozoom.texture.borderRadius", { min: config.texture.centerRadius });
+    assertNumber(config.motion.zoomBase, "rotozoom.motion.zoomBase", { min: 0 });
+    assertNumber(config.motion.zoomMin, "rotozoom.motion.zoomMin", { min: Number.MIN_VALUE, max: 1 });
+    assertNumber(config.appearance.contrast, "rotozoom.appearance.contrast", { min: Number.MIN_VALUE, max: 4 });
+    assertBoolean(config.transform.aspectCorrection, "rotozoom.transform.aspectCorrection");
+    for (const key of ["centerX", "centerY"]) {
+      assertNumber(config.transform[key], `rotozoom.transform.${key}`, { min: 0, max: 1 });
+    }
+    assertNumber(config.texture.tiles, "rotozoom.texture.tiles", { min: 0.5, max: 50 });
+    for (const key of ["frequencyU", "frequencyV"]) {
+      assertNumber(config.texture[key], `rotozoom.texture.${key}`, { min: 1, max: 32, integer: true });
+    }
+    for (const key of ["weightU", "weightV", "weightDiag"]) {
+      assertNumber(config.texture[key], `rotozoom.texture.${key}`, { min: 0, max: 1 });
+    }
   }
 
   // src/effects/rotozoom/skins.js
+  var CLASSIC_PALETTE = Object.freeze([
+    "#04060a",
+    // near-black navy shadow
+    "#0a1a2a",
+    // deep navy
+    "#0f3b4a",
+    // dark teal
+    "#136b6e",
+    // teal
+    "#1bb6c4",
+    // cyan midtone
+    "#7fe3d8",
+    // pale aqua
+    "#f2c14e",
+    // warm amber
+    "#fbe7c0",
+    // pale gold highlight
+    "#fffdf5"
+    // near-white crest accent (small share only)
+  ]);
   var ROTOZOOM_SKINS = Object.freeze({
-    classic: Object.freeze({})
+    classic: Object.freeze({
+      appearance: {
+        palette: CLASSIC_PALETTE,
+        colorCount: 256,
+        backgroundColor: "#04060a",
+        // Soft gamma applied to the normalized texture value before palette
+        // lookup. <1 opens up the shadow band so the lattice stays readable as it
+        // rotates; the value never clips to flat because the curve is bounded on
+        // (0,1].
+        contrast: 0.82
+      }
+    })
   });
 
   // src/effects/profiles.js
@@ -767,12 +836,15 @@
   var RUNTIME_FULLSCREEN_MOBILE = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_RENDER = { render: { resolution: 0.25 } };
+  var RENDER_FULLSCREEN = { render: { resolution: 0.5 } };
+  var RENDER_FULLSCREEN_MOBILE = { render: { resolution: 0.4 } };
+  var RENDER_PREVIEW = { render: { resolution: 0.3 } };
+  var RENDER_PREVIEW_MOBILE = { render: { resolution: 0.22 } };
   var ROTOZOOM_PROFILES = buildProfiles({
-    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP },
-    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP, ...PREVIEW_RENDER },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE, ...PREVIEW_RENDER }
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP, ...RENDER_FULLSCREEN },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE, ...RENDER_FULLSCREEN_MOBILE },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP, ...RENDER_PREVIEW },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE, ...RENDER_PREVIEW_MOBILE }
   });
 
   // src/effects/rotozoom/index.js
