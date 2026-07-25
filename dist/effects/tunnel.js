@@ -606,41 +606,92 @@
       new Uint32Array(config.appearance.colorCount),
       config.appearance.palette
     );
+    const pixelRatio = config.runtime.pixelRatio;
+    const [fogR, fogG, fogB] = parseHexColor(config.appearance.fogColor, "tunnel.appearance.fogColor");
     let width = 1;
     let height = 1;
+    let bw = 1;
+    let bh = 1;
+    let vpBufX = 0;
+    let vpBufY = 0;
+    let refRBuf = 1;
+    let epsBuf = 1;
+    let accumShift = 0;
+    let accumTwist = 0;
+    let accumColor = 0;
     return {
       resize(nextWidth, nextHeight) {
         width = nextWidth;
         height = nextHeight;
-        resizePixelBuffer(buffer, width * config.render.resolution, height * config.render.resolution);
+        bw = Math.max(2, Math.floor(nextWidth * config.render.resolution));
+        bh = Math.max(2, Math.floor(nextHeight * config.render.resolution));
+        resizePixelBuffer(buffer, bw, bh);
+        const cssW = nextWidth / pixelRatio;
+        const cssH = nextHeight / pixelRatio;
+        const vpCssX = config.geometry.centerX * cssW;
+        const vpCssY = config.geometry.centerY * cssH;
+        const refR = Math.max(1, Math.min(vpCssX, cssW - vpCssX, vpCssY, cssH - vpCssY));
+        const cssToBuf = pixelRatio * config.render.resolution;
+        vpBufX = vpCssX * cssToBuf;
+        vpBufY = vpCssY * cssToBuf;
+        refRBuf = refR * cssToBuf;
+        epsBuf = config.geometry.nearEpsilon * refRBuf;
       },
-      render({ time }) {
-        const centerX = buffer.width * config.geometry.centerX;
-        const centerY = buffer.height * config.geometry.centerY;
-        const shift = time * config.motion.speed * config.motion.forwardSpeed;
-        const angle = time * config.motion.speed * config.motion.rotationSpeed;
+      render({ delta }) {
+        const dt = Number.isFinite(delta) && delta > 0 ? delta : 0;
+        const speed = config.motion.speed;
+        accumShift = (accumShift + speed * config.motion.forwardSpeed * dt) % 1;
+        accumTwist = (accumTwist + speed * config.motion.rotationSpeed * dt) % 1;
+        accumColor = (accumColor + speed * config.motion.colorCycleSpeed * dt) % 1;
+        const wallFreq = config.geometry.wallFrequency;
+        const angFreq = config.geometry.angularFrequency / Math.PI;
+        const farClamp = config.geometry.farClamp;
+        const fogNear = config.geometry.fogNear;
+        const fogFar = config.geometry.fogFar;
+        const fogStrength = config.geometry.fogStrength;
+        const invFogRange = 1 / (fogFar - fogNear);
+        const pal = palette;
+        const palLen = palette.length;
+        const shift = accumShift;
+        const twist = accumTwist;
+        const colorCycle = accumColor;
+        const pixels = buffer.pixels;
         let index = 0;
-        for (let y = 0; y < buffer.height; y++) {
-          for (let x = 0; x < buffer.width; x++) {
-            const dx = x - centerX;
-            const dy = y - centerY;
-            const distance = Math.max(1e-4, Math.sqrt(dx * dx + dy * dy));
-            const polarAngle = Math.atan2(dy, dx) / Math.PI;
-            const textureU = config.geometry.radialFrequency / distance + shift;
-            const textureV = polarAngle * config.geometry.angularFrequency + angle;
-            const texture = Math.sin(textureU) * Math.cos(textureV);
-            const fog = Math.min(
-              1,
-              distance / (Math.min(buffer.width, buffer.height) * config.geometry.fogDistance)
-            );
-            const colorPosition = ((texture + 1) * 0.5 + time * config.motion.speed * config.motion.colorCycleSpeed / palette.length) % 1;
-            const color = palette[Math.floor((colorPosition + 1) % 1 * palette.length)];
-            const fade = config.geometry.fogMinimum + fog * (1 - config.geometry.fogMinimum);
-            buffer.pixels[index++] = packRgb(
-              (color & 255) * fade,
-              (color >>> 8 & 255) * fade,
-              (color >>> 16 & 255) * fade
-            );
+        for (let y = 0; y < bh; y++) {
+          const dy = y - vpBufY;
+          for (let x = 0; x < bw; x++) {
+            const dx = x - vpBufX;
+            const rBuf = Math.sqrt(dx * dx + dy * dy);
+            let depth;
+            if (rBuf <= epsBuf) {
+              depth = 1;
+            } else {
+              const raw = epsBuf / rBuf;
+              depth = raw < farClamp ? raw : farClamp;
+            }
+            const u = rBuf / refRBuf;
+            const textureU = wallFreq * depth + shift;
+            const textureV = Math.atan2(dy, dx) * angFreq + twist;
+            const pattern = 0.5 + 0.5 * (Math.sin(textureU) * Math.cos(textureV));
+            const depthShade = 1 - 0.35 * (depth / farClamp);
+            let colorPos = (pattern + colorCycle) % 1;
+            if (colorPos < 0) colorPos += 1;
+            let colorIndex = colorPos * palLen | 0;
+            if (colorIndex >= palLen) colorIndex = palLen - 1;
+            const color = pal[colorIndex];
+            let fogT = (fogFar - u) * invFogRange;
+            if (fogT < 0) fogT = 0;
+            else if (fogT > 1) fogT = 1;
+            fogT = fogT * fogT * (3 - 2 * fogT);
+            const fogFactor = fogT * fogStrength;
+            const invFog = 1 - fogFactor;
+            const wallR = (color & 255) * depthShade;
+            const wallG = (color >>> 8 & 255) * depthShade;
+            const wallB = (color >>> 16 & 255) * depthShade;
+            const fr = wallR * invFog + fogR * fogFactor;
+            const fg = wallG * invFog + fogG * fogFactor;
+            const fb = wallB * invFog + fogB * fogFactor;
+            pixels[index++] = 255 << 24 | (fb | 0) << 16 | (fg | 0) << 8 | (fr | 0);
           }
         }
         presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
@@ -651,37 +702,70 @@
   // src/effects/tunnel/config.js
   var TUNNEL_DEFAULTS = createEffectDefaults({
     render: { resolution: 1 / 3, smoothing: false },
-    motion: { speed: 1, forwardSpeed: 84, rotationSpeed: 1.26, colorCycleSpeed: 63 },
+    motion: { speed: 1, forwardSpeed: 0.9, rotationSpeed: 0.25, colorCycleSpeed: 0.12 },
     appearance: {
       palette: ["#ff80ee", "#60dfff", "#ffe86b", "#ff80ee"],
       colorCount: 256,
-      backgroundColor: "#000000"
+      backgroundColor: "#000000",
+      // Fog tint toward which the receding centre blends (skin-owned). Dark navy
+      // so the centre reads as the corridor receding into shadow, not blanking.
+      fogColor: "#05030f"
     },
     geometry: {
+      // Vanishing point in [0,1] of the CSS viewport.
       centerX: 0.5,
       centerY: 0.5,
-      radialFrequency: 60,
-      angularFrequency: 6,
-      fogDistance: 0.5,
-      fogMinimum: 0.15
+      // Wall texture: cycles per unit depth (dimensionless) and half-cycle lobes
+      // around the ring. Low frequencies to resist shimmer at coarse sampling.
+      wallFrequency: 2.4,
+      angularFrequency: 3,
+      // Guarded inverse-radius depth. nearEpsilon in units of u; farClamp >= 1 is
+      // the documented hard upper bound on depth (safety; the clamp already caps
+      // depth at 1 on the central disk).
+      nearEpsilon: 0.12,
+      farClamp: 6,
+      // Fog band, in units of u. Fog is at full strength for u <= fogNear (the
+      // deep centre) and zero for u >= fogFar (the clear near wall).
+      fogNear: 0.12,
+      fogFar: 0.9,
+      // [0,1] maximum fog blend. < 1 keeps the centre tinted toward fogColor
+      // rather than blanking, so the vanishing region never collapses to a flat
+      // pastel.
+      fogStrength: 0.85
     }
   });
   function validateTunnel(config) {
     for (const key of ["forwardSpeed", "rotationSpeed", "colorCycleSpeed"]) {
-      assertNumber(config.motion[key], `tunnel.motion.${key}`);
+      assertNumber(config.motion[key], `tunnel.motion.${key}`, { min: 0 });
     }
     for (const key of ["centerX", "centerY"]) {
-      assertNumber(config.geometry[key], `tunnel.geometry.${key}`);
+      assertNumber(config.geometry[key], `tunnel.geometry.${key}`, { min: 0, max: 1 });
     }
-    for (const key of ["radialFrequency", "angularFrequency", "fogDistance"]) {
-      assertNumber(config.geometry[key], `tunnel.geometry.${key}`, { min: Number.MIN_VALUE });
+    assertNumber(config.geometry.wallFrequency, "tunnel.geometry.wallFrequency", { min: 0, max: 8 });
+    assertNumber(config.geometry.angularFrequency, "tunnel.geometry.angularFrequency", { min: 0, max: 12 });
+    assertNumber(config.geometry.nearEpsilon, "tunnel.geometry.nearEpsilon", { min: Number.MIN_VALUE, max: 2 });
+    assertNumber(config.geometry.farClamp, "tunnel.geometry.farClamp", { min: 1 });
+    assertNumber(config.geometry.fogNear, "tunnel.geometry.fogNear", { min: 0, max: 2 });
+    assertNumber(config.geometry.fogFar, "tunnel.geometry.fogFar", { min: 0, max: 2 });
+    if (config.geometry.fogFar <= config.geometry.fogNear) {
+      throw new RangeError("tunnel.geometry.fogFar must be greater than fogNear.");
     }
-    assertNumber(config.geometry.fogMinimum, "tunnel.geometry.fogMinimum", { min: 0, max: 1 });
+    assertNumber(config.geometry.fogStrength, "tunnel.geometry.fogStrength", { min: 0, max: 1 });
+    assertString(config.appearance.fogColor, "tunnel.appearance.fogColor");
+    if (!/^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(config.appearance.fogColor)) {
+      throw new TypeError("tunnel.appearance.fogColor must use #rgb or #rrggbb.");
+    }
   }
 
   // src/effects/tunnel/skins.js
   var TUNNEL_SKINS = Object.freeze({
-    classic: Object.freeze({})
+    classic: Object.freeze({
+      appearance: Object.freeze({
+        backgroundColor: "#000000",
+        palette: Object.freeze(["#ff80ee", "#60dfff", "#ffe86b", "#ff80ee"]),
+        fogColor: "#05030f"
+      })
+    })
   });
 
   // src/effects/profiles.js
