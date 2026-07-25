@@ -1565,6 +1565,11 @@
   };
 
   // src/effects/mandelbrot/mandelbrot-core.js
+  var LOG2 = Math.log(2);
+  var DEFAULT_COLOR_SCALE = 1;
+  var DEFAULT_COLOR_CURVE = 1;
+  var DEFAULT_COLOR_OFFSET = 0;
+  var DEFAULT_CYCLE_SPEED = 0;
   function mandelbrotZoom(time, {
     minZoom,
     maxZoom,
@@ -1582,6 +1587,27 @@
     const shifted = real - 0.25;
     const q = shifted * shifted + imaginary * imaginary;
     return q * (q + shifted) <= 0.25 * imaginary * imaginary || (real + 1) * (real + 1) + imaginary * imaginary <= 0.0625;
+  }
+  function mandelbrotPaletteIndex({
+    iteration,
+    mag2,
+    colorScale,
+    colorCurve,
+    cyclePhase,
+    paletteLength
+  }) {
+    const guardedMag2 = mag2 < 1.0001 ? 1.0001 : mag2;
+    const logZn = Math.log(guardedMag2) / 2;
+    const ratio = logZn / LOG2;
+    const nu = Math.log(ratio < 1e-12 ? 1e-12 : ratio) / LOG2;
+    const rawSmooth = iteration + 1 - nu;
+    let colorCoord = rawSmooth * colorScale + cyclePhase;
+    colorCoord -= Math.floor(colorCoord);
+    const gamma = colorCurve < 0.01 ? 0.01 : colorCurve > 100 ? 100 : colorCurve;
+    const shaped = colorCoord ** (1 / gamma);
+    const lastIndex = paletteLength - 1;
+    const index = Math.floor(shaped * lastIndex + 0.5);
+    return index < 0 ? 0 : index > lastIndex ? lastIndex : index;
   }
   function renderMandelbrotPixels({
     pixels,
@@ -1603,7 +1629,13 @@
     );
     const maxIterations = config.algorithm.maxIterations ?? calculatedIterations;
     const escapeSquared = config.algorithm.escapeRadius ** 2;
-    const log2 = Math.log(2);
+    const appearance = config.appearance ?? {};
+    const colorScale = appearance.colorScale ?? DEFAULT_COLOR_SCALE;
+    const colorCurve = appearance.colorCurve ?? DEFAULT_COLOR_CURVE;
+    const colorOffset = appearance.colorOffset ?? DEFAULT_COLOR_OFFSET;
+    const cycleSpeed = appearance.cycleSpeed ?? DEFAULT_CYCLE_SPEED;
+    const cyclePhase = time * (config.motion?.speed ?? 1) * cycleSpeed + colorOffset;
+    const paletteLength = palette.length;
     const realStep = 2 * span / width;
     const imaginaryStep = 2 * span / aspect / height;
     const realStart = config.camera.centerX - span;
@@ -1630,14 +1662,19 @@
           zImaginarySquared = zImaginary * zImaginary;
           iteration++;
         }
-        if (iteration === maxIterations) {
+        const mag2 = zRealSquared + zImaginarySquared;
+        if (mag2 < escapeSquared) {
           pixels[index++] = interiorColor;
           continue;
         }
-        const logZn = Math.log(zRealSquared + zImaginarySquared) / 2;
-        const nu = Math.log(logZn / log2) / log2;
-        const smooth = iteration + 1 - nu;
-        pixels[index++] = palette[Math.abs(Math.floor(smooth * 8)) % palette.length];
+        pixels[index++] = palette[mandelbrotPaletteIndex({
+          iteration,
+          mag2,
+          colorScale,
+          colorCurve,
+          cyclePhase,
+          paletteLength
+        })];
       }
     }
     return { zoom, maxIterations };
@@ -1654,7 +1691,7 @@ const vec2 POSITIONS[3] = vec2[3](
 void main() {
   gl_Position = vec4(POSITIONS[gl_VertexID], 0.0, 1.0);
 }`;
-  var FRAGMENT_SHADER = `#version 300 es
+  var MANDELBROT_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 precision highp int;
 
@@ -1671,6 +1708,9 @@ uniform sampler2D uPalette;
 uniform int uPaletteWidth;
 uniform int uPaletteSize;
 uniform vec4 uInteriorColor;
+uniform float uColorScale;
+uniform float uColorCurve;
+uniform float uCyclePhase;
 
 out vec4 fragmentColor;
 
@@ -1758,11 +1798,23 @@ void main() {
     return;
   }
 
+  // Continuous normalized escape colouring — mirrors mandelbrot-core.js
+  // mandelbrotPaletteIndex line for line (same guards, same LOG2, same ramp
+  // wrap). The parity test asserts the guarded expressions below appear
+  // verbatim in this shader source. The perturbation path above only changes
+  // how z is iterated; once escaped, dot(z,z) feeds this identical formula, so
+  // the Canvas2D and WebGL outputs agree.
   const float LOG_TWO = 0.6931471805599453;
-  float logZn = log(dot(z, z)) * 0.5;
-  float nu = log(logZn / LOG_TWO) / LOG_TWO;
-  float smoothValue = float(iteration) + 1.0 - nu;
-  int paletteIndex = int(abs(floor(smoothValue * 8.0))) % uPaletteSize;
+  float mag2 = max(dot(z, z), 1.0001);
+  float logZn = log(mag2) * 0.5;
+  float ratio = logZn / LOG_TWO;
+  float nu = log(max(ratio, 1e-12)) / LOG_TWO;
+  float rawSmooth = float(iteration) + 1.0 - nu;
+  float colorCoord = rawSmooth * uColorScale + uCyclePhase;
+  colorCoord = colorCoord - floor(colorCoord);
+  float shaped = pow(colorCoord, 1.0 / clamp(uColorCurve, 0.01, 100.0));
+  float paletteCoord = shaped * (float(uPaletteSize) - 1.0);
+  int paletteIndex = int(clamp(floor(paletteCoord + 0.5), 0.0, float(uPaletteSize) - 1.0));
   fragmentColor = paletteValue(paletteIndex);
 }`;
   function compileShader(gl, type, source) {
@@ -1779,7 +1831,7 @@ void main() {
   }
   function createProgram(gl) {
     const vertex = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
-    const fragment = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
+    const fragment = compileShader(gl, gl.FRAGMENT_SHADER, MANDELBROT_FRAGMENT_SHADER);
     const program = gl.createProgram();
     if (!program) throw new Error("Unable to create Mandelbrot WebGL2 program.");
     gl.attachShader(program, vertex);
@@ -1934,7 +1986,10 @@ void main() {
         "uPalette",
         "uPaletteWidth",
         "uPaletteSize",
-        "uInteriorColor"
+        "uInteriorColor",
+        "uColorScale",
+        "uColorCurve",
+        "uCyclePhase"
       ];
       return Object.fromEntries(names.map((name) => [name, gl.getUniformLocation(program, name)]));
     }
@@ -2011,6 +2066,7 @@ void main() {
         );
         const frameIterations = config.algorithm.maxIterations ?? calculatedIterations;
         const usePerturbation = zoom >= 1e3 && referenceOrbitValid;
+        const cyclePhase = time * config.motion.speed * config.appearance.cycleSpeed + config.appearance.colorOffset;
         gl.useProgram(program);
         gl.viewport(0, 0, width, height);
         gl.uniform2f(locations.uResolution, width, height);
@@ -2026,6 +2082,9 @@ void main() {
         gl.uniform1i(locations.uPaletteWidth, paletteShape.width);
         gl.uniform1i(locations.uPaletteSize, palette.length);
         gl.uniform4f(locations.uInteriorColor, ...interiorColor);
+        gl.uniform1f(locations.uColorScale, config.appearance.colorScale);
+        gl.uniform1f(locations.uColorCurve, config.appearance.colorCurve);
+        gl.uniform1f(locations.uCyclePhase, cyclePhase);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
       },
       getStats() {
@@ -2098,6 +2157,13 @@ void main() {
   }
 
   // src/effects/mandelbrot/config.js
+  var HEX_COLOR_PATTERN = /^#(?:[\da-f]{3}|[\da-f]{6})$/i;
+  function assertHexColor(value, path) {
+    assertString(value, path);
+    if (!HEX_COLOR_PATTERN.test(value)) {
+      throw new TypeError(`${path} must use #rgb or #rrggbb.`);
+    }
+  }
   var MANDELBROT_DEFAULTS = createEffectDefaults({
     render: { backend: "canvas2d", resolution: 0.2, smoothing: false },
     motion: { speed: 1, cycleSeconds: 28, startPhase: 0 },
@@ -2119,7 +2185,19 @@ void main() {
       ],
       colorCount: 1024,
       backgroundColor: "#000000",
-      interiorColor: "#000000"
+      interiorColor: "#000000",
+      // Continuous escape-coloring visual knobs (issue #10). These are
+      // presentation only — the fractal geometry (camera, bailout, iteration
+      // ceiling) lives in `camera`/`algorithm`. The defaults below are the
+      // identity baseline; the `classic` skin (skins.js) overrides them with the
+      // authored continuous ramp. `colorScale` is the tunable replacement for the
+      // old hard-coded `*8` band factor; `colorCurve` is contrast/gamma on the
+      // normalized palette coordinate; `colorOffset`+`cycleSpeed` give a slow
+      // continuous drift of the palette coordinate WITHOUT changing geometry.
+      colorScale: 1,
+      colorCurve: 1,
+      colorOffset: 0,
+      cycleSpeed: 0
     },
     camera: {
       centerX: -0.7436438870371587,
@@ -2141,6 +2219,12 @@ void main() {
     }
     assertNumber(config.motion.cycleSeconds, "mandelbrot.motion.cycleSeconds", { min: Number.MIN_VALUE });
     assertNumber(config.motion.startPhase, "mandelbrot.motion.startPhase", { min: 0, max: 1 });
+    assertHexColor(config.appearance.interiorColor, "mandelbrot.appearance.interiorColor");
+    assertHexColor(config.appearance.backgroundColor, "mandelbrot.appearance.backgroundColor");
+    assertNumber(config.appearance.colorScale, "mandelbrot.appearance.colorScale", { min: 0 });
+    assertNumber(config.appearance.colorCurve, "mandelbrot.appearance.colorCurve", { min: 0 });
+    assertNumber(config.appearance.colorOffset, "mandelbrot.appearance.colorOffset");
+    assertNumber(config.appearance.cycleSpeed, "mandelbrot.appearance.cycleSpeed", { min: 0 });
     for (const key of ["centerX", "centerY"]) {
       assertNumber(config.camera[key], `mandelbrot.camera.${key}`);
     }
@@ -2162,7 +2246,18 @@ void main() {
 
   // src/effects/mandelbrot/skins.js
   var MANDELBROT_SKINS = Object.freeze({
-    classic: Object.freeze({})
+    classic: Object.freeze({
+      appearance: {
+        // ~0.06 palette-widths per unit smooth-iteration: a slow, continuous ramp
+        // instead of the old eight-hard-bands-per-iteration modulo stripe.
+        colorScale: 0.06,
+        colorCurve: 1,
+        colorOffset: 0,
+        // One full palette traversal every ~50 s — a gentle continuous shimmer
+        // that does not alter the auto-zoom geometry.
+        cycleSpeed: 0.02
+      }
+    })
   });
 
   // src/effects/mandelbrot/profiles.js
@@ -2170,12 +2265,28 @@ void main() {
   var RUNTIME_FULLSCREEN_MOBILE6 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_DESKTOP6 = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
   var RUNTIME_PREVIEW_MOBILE6 = { runtime: { maxFps: 24, pixelRatio: 1, pauseWhenHidden: true } };
-  var PREVIEW_RENDER3 = { render: { resolution: 0.15, smoothing: true } };
+  var PREVIEW_RENDER3 = { render: { resolution: 0.19, smoothing: true } };
+  var CAMERA_LANDSCAPE = {
+    camera: {
+      centerX: -0.7436438870371587,
+      centerY: 0.1318259042053119,
+      minZoom: 1,
+      maxZoom: 1e6
+    }
+  };
+  var CAMERA_PORTRAIT = {
+    camera: {
+      centerX: -0.7436438870371587,
+      centerY: 0.1318259042053119,
+      minZoom: 2.4,
+      maxZoom: 8e5
+    }
+  };
   var MANDELBROT_PROFILES = buildProfiles({
-    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP6 },
-    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE6 },
-    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP6, ...PREVIEW_RENDER3 },
-    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE6, ...PREVIEW_RENDER3 }
+    "fullscreen.desktop": { ...RUNTIME_FULLSCREEN_DESKTOP6, ...CAMERA_LANDSCAPE },
+    "fullscreen.mobile": { ...RUNTIME_FULLSCREEN_MOBILE6, ...CAMERA_PORTRAIT },
+    "preview.desktop": { ...RUNTIME_PREVIEW_DESKTOP6, ...PREVIEW_RENDER3, ...CAMERA_LANDSCAPE },
+    "preview.mobile": { ...RUNTIME_PREVIEW_MOBILE6, ...PREVIEW_RENDER3, ...CAMERA_PORTRAIT }
   });
 
   // src/effects/mandelbrot/index.js
