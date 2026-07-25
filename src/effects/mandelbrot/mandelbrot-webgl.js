@@ -12,7 +12,11 @@ void main() {
   gl_Position = vec4(POSITIONS[gl_VertexID], 0.0, 1.0);
 }`;
 
-const FRAGMENT_SHADER = `#version 300 es
+// Exported so the parity test (tests/library.test.js) can assert the guarded
+// continuous-coloring expressions appear verbatim here, mirroring
+// mandelbrot-core.js `mandelbrotPaletteIndex` — this is how Canvas2D/WebGL
+// semantic parity is verified without a live GL context.
+export const MANDELBROT_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 precision highp int;
 
@@ -29,6 +33,9 @@ uniform sampler2D uPalette;
 uniform int uPaletteWidth;
 uniform int uPaletteSize;
 uniform vec4 uInteriorColor;
+uniform float uColorScale;
+uniform float uColorCurve;
+uniform float uCyclePhase;
 
 out vec4 fragmentColor;
 
@@ -116,11 +123,23 @@ void main() {
     return;
   }
 
+  // Continuous normalized escape colouring — mirrors mandelbrot-core.js
+  // mandelbrotPaletteIndex line for line (same guards, same LOG2, same ramp
+  // wrap). The parity test asserts the guarded expressions below appear
+  // verbatim in this shader source. The perturbation path above only changes
+  // how z is iterated; once escaped, dot(z,z) feeds this identical formula, so
+  // the Canvas2D and WebGL outputs agree.
   const float LOG_TWO = 0.6931471805599453;
-  float logZn = log(dot(z, z)) * 0.5;
-  float nu = log(logZn / LOG_TWO) / LOG_TWO;
-  float smoothValue = float(iteration) + 1.0 - nu;
-  int paletteIndex = int(abs(floor(smoothValue * 8.0))) % uPaletteSize;
+  float mag2 = max(dot(z, z), 1.0001);
+  float logZn = log(mag2) * 0.5;
+  float ratio = logZn / LOG_TWO;
+  float nu = log(max(ratio, 1e-12)) / LOG_TWO;
+  float rawSmooth = float(iteration) + 1.0 - nu;
+  float colorCoord = rawSmooth * uColorScale + uCyclePhase;
+  colorCoord = colorCoord - floor(colorCoord);
+  float shaped = pow(colorCoord, 1.0 / clamp(uColorCurve, 0.01, 100.0));
+  float paletteCoord = shaped * (float(uPaletteSize) - 1.0);
+  int paletteIndex = int(clamp(floor(paletteCoord + 0.5), 0.0, float(uPaletteSize) - 1.0));
   fragmentColor = paletteValue(paletteIndex);
 }`;
 
@@ -139,7 +158,7 @@ function compileShader(gl, type, source) {
 
 function createProgram(gl) {
   const vertex = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
-  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
+  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, MANDELBROT_FRAGMENT_SHADER);
   const program = gl.createProgram();
   if (!program) throw new Error('Unable to create Mandelbrot WebGL2 program.');
   gl.attachShader(program, vertex);
@@ -295,7 +314,7 @@ export function createMandelbrotWebGLRenderer({ canvas, config }) {
       'uResolution', 'uCenter', 'uSpan', 'uEscapeSquared', 'uZoom',
       'uMaxIterations', 'uUsePerturbation', 'uReferenceOrbit',
       'uReferenceWidth', 'uPalette', 'uPaletteWidth', 'uPaletteSize',
-      'uInteriorColor'
+      'uInteriorColor', 'uColorScale', 'uColorCurve', 'uCyclePhase'
     ];
     return Object.fromEntries(names.map((name) => [name, gl.getUniformLocation(program, name)]));
   }
@@ -378,6 +397,12 @@ export function createMandelbrotWebGLRenderer({ canvas, config }) {
       // iteration ceiling, not on zoom. It is uploaded once when the backend
       // is initialised instead of being recomputed and transferred every frame.
       const usePerturbation = zoom >= 1000 && referenceOrbitValid;
+      // Continuous-coloring uniforms (issue #10). The cycle phase advances the
+      // palette coordinate slowly over time WITHOUT touching the complex plane
+      // (zoom/center/bailout are all geometry, set above). Mirrors the Canvas2D
+      // cyclePhase in mandelbrot-core.js.
+      const cyclePhase = time * config.motion.speed * config.appearance.cycleSpeed
+        + config.appearance.colorOffset;
       gl.useProgram(program);
       gl.viewport(0, 0, width, height);
       gl.uniform2f(locations.uResolution, width, height);
@@ -393,6 +418,9 @@ export function createMandelbrotWebGLRenderer({ canvas, config }) {
       gl.uniform1i(locations.uPaletteWidth, paletteShape.width);
       gl.uniform1i(locations.uPaletteSize, palette.length);
       gl.uniform4f(locations.uInteriorColor, ...interiorColor);
+      gl.uniform1f(locations.uColorScale, config.appearance.colorScale);
+      gl.uniform1f(locations.uColorCurve, config.appearance.colorCurve);
+      gl.uniform1f(locations.uCyclePhase, cyclePhase);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     },
     getStats() {

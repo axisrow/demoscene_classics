@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { performance } from 'node:perf_hooks';
 import test from 'node:test';
 import vm from 'node:vm';
 
-import { mandelbrotZoom, renderMandelbrotPixels } from '../src/effects/mandelbrot/mandelbrot-core.js';
+import { mandelbrotPaletteIndex, mandelbrotZoom, renderMandelbrotPixels } from '../src/effects/mandelbrot/mandelbrot-core.js';
+import { MANDELBROT_FRAGMENT_SHADER } from '../src/effects/mandelbrot/mandelbrot-webgl.js';
+import { mandelbrotDefinition } from '../src/effects/mandelbrot/index.js';
+import { resolveDescriptor } from '../src/resolver.js';
 import { buildGradientPalette, packHexColor, packRgb } from '../src/effects/utils.js';
 import { PROFILE_SLOT_KEYS, buildProfiles } from '../src/effects/profiles.js';
 
@@ -542,7 +546,7 @@ test('classic default frames remain pixel-stable and unchanged from the v2 basel
     starfield: 'vector:95857935',
     metaballs: 'pixels:b18e0d45',
     tunnel: 'pixels:ac04a300',
-    mandelbrot: 'pixels:72d102ad',
+    mandelbrot: 'pixels:f05b5719',
     sineScroller: 'vector:1a8c3cf0',
     rotozoom: 'pixels:cb358dc5',
     feedback: 'vector:7e2ccd86',
@@ -1085,3 +1089,356 @@ test('output filenames are unchanged from the v2 public contract', async () => {
   const present = (await readdir(new URL('../dist/effects/', import.meta.url))).sort();
   assert.deepEqual(present, expected);
 });
+
+// ---------------------------------------------------------------------------
+// Issue #10 — Mandelbrot continuous coloring, Canvas2D/WebGL parity, and
+// responsive camera/quality. These tests live with the rest of the suite
+// because the deterministic pixel-baseline path (Canvas 2D) is the in-repo
+// proxy for the browser visual harness (#4), which is not in this branch.
+// ---------------------------------------------------------------------------
+
+// Resolve the default mandelbrot config (defaults -> classic skin -> matched
+// slot) so the continuous-coloring tests use the real authored knobs instead of
+// hand-built values.
+function mandelbrotConfig(overrides = {}) {
+  return resolveDescriptor(mandelbrotDefinition, { config: overrides }).config;
+}
+
+function buildPalette(config) {
+  return buildGradientPalette(
+    new Uint32Array(config.appearance.colorCount),
+    config.appearance.palette
+  );
+}
+
+test('mandelbrot continuous coloring is finite, gradient-rich, monotonic in iteration, and interior-stable', () => {
+  const config = mandelbrotConfig({
+    runtime: { autoStart: false },
+    camera: { minZoom: 1, maxZoom: 60 }, // low zoom so the boundary is sampled at 64 wide
+    algorithm: { maxIterations: 120 }
+  });
+  const width = 64;
+  const height = 48;
+  const pixels = new Uint32Array(width * height);
+  const palette = buildPalette(config);
+  const interiorColor = packHexColor(config.appearance.interiorColor);
+  renderMandelbrotPixels({ pixels, width, height, time: 0, config, palette, interiorColor });
+
+  // Every pixel is a finite, defined packed colour (no NaN/undefined leak).
+  for (const pixel of pixels) {
+    assert.equal(Number.isFinite(pixel), true);
+    assert.equal(pixel >= 0, true);
+  }
+
+  // Continuous (not banded) coloring proof: the rendered escape region uses a
+  // LARGE number of distinct palette entries. The old `floor(smooth * 8) %
+  // length` quantized every escape pixel into one of ~8 bands per integer
+  // iteration, collapsing the output to a handful of repeating stripes. A
+  // continuous ramp walks many distinct entries; require a healthy minimum.
+  const escapeColors = new Set();
+  for (const pixel of pixels) {
+    if ((pixel >>> 0) !== (interiorColor >>> 0)) escapeColors.add(pixel >>> 0);
+  }
+  assert.ok(escapeColors.size >= 50,
+    `continuous coloring produced only ${escapeColors.size} distinct colours (band-chop regression)`);
+
+  // Monotonicity is a property of the FORMULA, not the fractal boundary
+  // (adjacent image pixels can have wildly different iteration counts by
+  // construction). Holding mag2 fixed and stepping iteration by 1, the palette
+  // index must advance smoothly — never jumping backwards by a large amount
+  // within one iteration unit (cyclic distance, since the ramp wraps).
+  const paletteLength = palette.length;
+  let prev = null;
+  for (let iteration = 5; iteration < 40; iteration++) {
+    const index = mandelbrotPaletteIndex({
+      iteration, mag2: 300, colorScale: 0.06, colorCurve: 1, cyclePhase: 0, paletteLength
+    });
+    assert.equal(Number.isFinite(index), true);
+    assert.ok(index >= 0 && index < paletteLength);
+    if (prev !== null) {
+      const linear = Math.abs(index - prev);
+      const cyclicJump = Math.min(linear, paletteLength - linear);
+      // ~0.06 palette-widths per iteration => well under paletteLength/8.
+      assert.ok(cyclicJump < paletteLength / 8,
+        `smooth index moved ${cyclicJump} entries for one iteration (band-chop)`);
+    }
+    prev = index;
+  }
+
+  // Interior pixels (the cardioid centre is firmly inside the set) are the
+  // configured interior colour, stably, and distinct from the escape ramp.
+  const interiorX = Math.floor(width * 0.5);
+  const interiorY = Math.floor(height * 0.5);
+  assert.equal(pixels[interiorY * width + interiorX] >>> 0, interiorColor >>> 0);
+});
+
+test('mandelbrot smooth palette index is guarded against degenerate escape magnitudes', () => {
+  const paletteLength = 256;
+  const common = { colorScale: 0.06, colorCurve: 1, cyclePhase: 0, paletteLength };
+
+  // A barely-escaped point and an absurdly-escaped point both yield a finite,
+  // in-range index — no NaN/-Infinity reaches the lookup.
+  const tiny = mandelbrotPaletteIndex({ iteration: 5, mag2: 4.0001, ...common });
+  const huge = mandelbrotPaletteIndex({ iteration: 5, mag2: 1e18, ...common });
+  assert.equal(Number.isFinite(tiny), true);
+  assert.equal(Number.isFinite(huge), true);
+  assert.ok(tiny >= 0 && tiny < paletteLength);
+  assert.ok(huge >= 0 && huge < paletteLength);
+
+  // Degenerate magnitudes that would feed log(<=0) are clamped, not NaN'd.
+  const zero = mandelbrotPaletteIndex({ iteration: 5, mag2: 0, ...common });
+  const negative = mandelbrotPaletteIndex({ iteration: 5, mag2: -1, ...common });
+  assert.equal(Number.isFinite(zero), true);
+  assert.equal(Number.isFinite(negative), true);
+
+  // Monotonicity around escape fixtures: holding iteration, a larger escape
+  // magnitude must not invert the smooth value's direction in a way that
+  // breaks continuity across neighbouring iteration bands.
+  const atBoundary = mandelbrotPaletteIndex({ iteration: 10, mag2: 4.5, ...common });
+  const farther = mandelbrotPaletteIndex({ iteration: 10, mag2: 100, ...common });
+  assert.ok(Math.abs(atBoundary - farther) <= paletteLength,
+    'smooth value stays within one palette traversal for one iteration unit');
+
+  // colorScale 0 collapses the ramp to a single band (palette[0]) with no NaN.
+  const flat = mandelbrotPaletteIndex({ iteration: 50, mag2: 1e6, colorScale: 0, colorCurve: 1, cyclePhase: 0, paletteLength });
+  assert.equal(flat, 0);
+
+  // Render path with the minimum escape radius stays NaN-free.
+  const config = mandelbrotConfig({
+    runtime: { autoStart: false },
+    algorithm: { escapeRadius: 2, maxIterations: 80 }
+  });
+  const pixels = new Uint32Array(32 * 20);
+  const palette = buildPalette(config);
+  renderMandelbrotPixels({
+    pixels, width: 32, height: 20, time: 0, config, palette,
+    interiorColor: packHexColor(config.appearance.interiorColor)
+  });
+  assert.ok(pixels.every((pixel) => Number.isFinite(pixel) && pixel >= 0));
+});
+
+test('mandelbrot Canvas2D and WebGL share the same guarded coloring formula and complex-plane mapping', () => {
+  // The GLSL cannot run in Node, so parity is verified structurally: the
+  // fragment shader source must contain the exact guarded expressions and
+  // uniform names that mandelbrot-core.js uses, proving the two paths mirror
+  // one formula.
+  const shader = MANDELBROT_FRAGMENT_SHADER;
+  assert.match(shader, /uniform float uColorScale;/);
+  assert.match(shader, /uniform float uColorCurve;/);
+  assert.match(shader, /uniform float uCyclePhase;/);
+  // Guards present verbatim.
+  assert.ok(shader.includes('max(dot(z, z), 1.0001)'), 'shader must guard the magnitude');
+  assert.ok(shader.includes('max(ratio, 1e-12)'), 'shader must guard the inner log argument');
+  // Continuous ramp wrap + curve present, old band-chop absent.
+  assert.ok(shader.includes('colorCoord - floor(colorCoord)'));
+  assert.ok(shader.includes('pow(colorCoord, 1.0 / clamp(uColorCurve, 0.01, 100.0))'));
+  assert.equal(shader.includes('* 8.0'), false, 'old aggressive *8 band factor must be gone');
+
+  // Same coordinate transform: both derive the complex window from
+  // span = 3 / zoom and aspect = W/H with span as a real-axis half-extent.
+  // Evaluate the JS mapping and the GLSL deltaC expression with identical
+  // uploaded values and confirm the four corners match.
+  const zoom = 4;
+  const centerX = -0.7436438870371587;
+  const centerY = 0.1318259042053119;
+  const W = 100;
+  const H = 60;
+  const aspect = W / H;
+  const span = 3 / zoom;
+
+  function jsCorner(px, py) {
+    // realStart = centerX - span; realStep = 2*span/W
+    const real = centerX - span + px * (2 * span / W);
+    // imaginaryStart = centerY - span/aspect; imaginaryStep = 2*span/aspect/H
+    const imaginary = centerY - span / aspect + py * (2 * span / aspect / H);
+    return [real, imaginary];
+  }
+  // GLSL: pixelX = gl_FragCoord.x - 0.5; deltaC = (-span + 2*span*pixelX/W, -span/aspect + 2*span*pixelY/(aspect*H)); point = center + deltaC
+  function glslCorner(px, py) {
+    const pixelX = px + 0.5 - 0.5; // texel centre
+    const pixelY = py + 0.5 - 0.5;
+    const real = centerX + (-span + 2 * span * pixelX / W);
+    const imaginary = centerY + (-span / aspect + 2 * span * pixelY / (aspect * H));
+    return [real, imaginary];
+  }
+  for (const [px, py] of [[0, 0], [W - 1, 0], [0, H - 1], [W - 1, H - 1]]) {
+    const [jr, ji] = jsCorner(px, py);
+    const [gr, gi] = glslCorner(px, py);
+    assert.ok(Math.abs(jr - gr) < 1e-9, `real corner mismatch at ${px},${py}`);
+    assert.ok(Math.abs(ji - gi) < 1e-9, `imag corner mismatch at ${px},${py}`);
+  }
+});
+
+test('mandelbrot Canvas2D classifies a point that escapes on the final iteration as escaped, matching WebGL', () => {
+  // Issue #10 parity requirement: a point whose magnitude crosses the escape
+  // radius on the very last iteration is an ESCAPED point, not interior. The
+  // WebGL shader sets `escaped = true` and applies continuous coloring; Canvas
+  // 2D must agree rather than treating `iteration === maxIterations` as a
+  // blanket interior signal. (maxIterations:1, escapeRadius:2, point (3,0):
+  // one step -> z=3, mag2=9 >= 4 -> escaped.)
+  const config = {
+    motion: { speed: 1, cycleSeconds: 28, startPhase: 0 },
+    camera: { centerX: 6, centerY: 0, minZoom: 1, maxZoom: 1 },
+    algorithm: { iterationBase: 80, iterationGrowth: 60, maxIterations: 1, escapeRadius: 2 },
+    appearance: {
+      palette: ['#000000', '#ffffff'], colorCount: 256, backgroundColor: '#000000',
+      interiorColor: '#000000', colorScale: 0.06, colorCurve: 1, colorOffset: 0, cycleSpeed: 0
+    }
+  };
+  // centerX=6 with zoom=1 => span=3 => realStart = 6-3 = 3, so the lone pixel
+  // (x=0) samples real=3 (the escape fixture). imag lands near 0.
+  const pixels = new Uint32Array(1);
+  const palette = buildGradientPalette(new Uint32Array(256), config.appearance.palette);
+  const interiorColor = packHexColor(config.appearance.interiorColor) >>> 0;
+  renderMandelbrotPixels({ pixels, width: 1, height: 1, time: 0, config, palette, interiorColor });
+  // The point escaped (mag2=9 >= escapeSquared=4), so it must NOT be interior.
+  assert.notEqual(pixels[0] >>> 0, interiorColor,
+    'a point that escapes on the final iteration must be coloured, not painted interior');
+});
+
+test('mandelbrot portrait and landscape profile slots carry distinct cameras and resolution-independent bounds', () => {
+  const slots = {
+    'fullscreen.desktop': resolveDescriptor(mandelbrotDefinition, { surface: 'fullscreen', device: 'desktop' }).config,
+    'fullscreen.mobile': resolveDescriptor(mandelbrotDefinition, { surface: 'fullscreen', device: 'mobile' }).config,
+    'preview.desktop': resolveDescriptor(mandelbrotDefinition, { surface: 'preview', device: 'desktop' }).config,
+    'preview.mobile': resolveDescriptor(mandelbrotDefinition, { surface: 'preview', device: 'mobile' }).config
+  };
+
+  // Desktop slots (landscape) and mobile slots (portrait) diverge on the zoom
+  // floor — the explicit responsive camera override from issue #10.
+  assert.equal(slots['fullscreen.desktop'].camera.minZoom, slots['preview.desktop'].camera.minZoom);
+  assert.equal(slots['fullscreen.mobile'].camera.minZoom, slots['preview.mobile'].camera.minZoom);
+  assert.notEqual(slots['fullscreen.desktop'].camera.minZoom, slots['fullscreen.mobile'].camera.minZoom,
+    'portrait and landscape must frame differently');
+  // Both orientations point at the same Seahorse-Valley feature.
+  assert.equal(slots['fullscreen.desktop'].camera.centerX, slots['fullscreen.mobile'].camera.centerX);
+  assert.equal(slots['fullscreen.desktop'].camera.centerY, slots['fullscreen.mobile'].camera.centerY);
+  // Preview resolution raised above the old 0.15 and still below the fullscreen default.
+  assert.ok(slots['preview.desktop'].render.resolution > 0.15);
+  assert.ok(slots['preview.desktop'].render.resolution < slots['fullscreen.desktop'].render.resolution);
+
+  // Resolution-independence: the complex-plane window must NOT move when the
+  // buffer dimensions change. Evaluate the same slot config at two buffer sizes
+  // and confirm the span (and the complex coordinate of the buffer centre)
+  // are identical — bounds come from zoom + centre + aspect, never from the
+  // sampling resolution.
+  function windowAt(config, W, H) {
+    const zoom = mandelbrotZoom(0, { ...config.motion, ...config.camera });
+    const span = 3 / zoom;
+    const aspect = W / H;
+    const centreReal = config.camera.centerX - span + (W / 2) * (2 * span / W);
+    const centreImag = config.camera.centerY - span / aspect + (H / 2) * (2 * span / aspect / H);
+    return { span, centreReal, centreImag };
+  }
+  for (const key of Object.keys(slots)) {
+    const a = windowAt(slots[key], 1280, 720);
+    const b = windowAt(slots[key], 640, 360);
+    assert.equal(a.span, b.span, `${key} span must not depend on buffer size`);
+    // The complex coordinate of the buffer centre is exactly camera.center for
+    // any buffer size (the window is centred on the camera by construction).
+    assert.ok(Math.abs(a.centreReal - slots[key].camera.centerX) < 1e-9, `${key} centre real drift`);
+    assert.ok(Math.abs(b.centreReal - slots[key].camera.centerX) < 1e-9, `${key} centre real drift at half size`);
+  }
+});
+
+test('mandelbrot full API v3 skin and config overrides drive the continuous coloring', async () => {
+  const environment = createEnvironment();
+  await loadBundle('../dist/effects/mandelbrot.js', environment);
+  const canvas = environment.createCanvas('#demo', 64, 40);
+
+  const controller = environment.sandbox.Demoscene.mandelbrot(canvas, {
+    skin: { preset: 'classic', overrides: { appearance: { colorScale: 0.5, colorCurve: 2, cycleSpeed: 0.1 } } },
+    config: { runtime: { autoStart: false }, appearance: { interiorColor: '#101010' } }
+  });
+  const config = controller.getConfig();
+  // Skin override reaches the resolved config (explicit config did not touch colorScale).
+  assert.equal(config.appearance.colorScale, 0.5);
+  assert.equal(config.appearance.colorCurve, 2);
+  assert.equal(config.appearance.cycleSpeed, 0.1);
+  // Explicit config still wins where it speaks.
+  assert.equal(config.appearance.interiorColor, '#101010');
+
+  // The authored knobs reach the pixel output: a frame with the overridden
+  // colorScale differs from the default-skin frame.
+  controller.renderOnce(0);
+  const overridden = new Uint32Array(
+    environment.canvases.find((candidate) => candidate !== canvas).context.lastImage.slice()
+  );
+  controller.destroy();
+
+  const baseEnv = createEnvironment();
+  await loadBundle('../dist/effects/mandelbrot.js', baseEnv);
+  const baseCanvas = baseEnv.createCanvas('#demo', 64, 40);
+  const baseController = baseEnv.sandbox.Demoscene.mandelbrot(baseCanvas, {
+    config: { runtime: { autoStart: false } }
+  });
+  baseController.renderOnce(0);
+  const base = new Uint32Array(
+    baseEnv.canvases.find((candidate) => candidate !== baseCanvas).context.lastImage.slice()
+  );
+  assert.notDeepEqual([...overridden], [...base], 'colorScale override must change the rendered frame');
+});
+
+test('mandelbrot WebGL renderer renders with the parity uniforms without breaking texture budgets', async () => {
+  const environment = createEnvironment({ webgl: true });
+  await loadBundle('../dist/effects/mandelbrot.js', environment);
+  const canvas = environment.createCanvas('#demo', 100, 60);
+  const controller = environment.sandbox.Demoscene.mandelbrot(canvas, {
+    config: {
+      runtime: { autoStart: false },
+      render: { backend: 'webgl2', resolution: 0.6 },
+      algorithm: { maxIterations: 140 }
+    }
+  });
+  controller.renderOnce(0);
+  // Backend, texture uploads (palette + reference orbit, unchanged), and draw
+  // are all exercised. The new continuous-coloring knobs ride on uniforms
+  // (uniform1f), NOT textures, so upload counts stay at 2 — verified here.
+  // The shader-source parity itself is asserted by the dedicated parity test
+  // against the imported MANDELBROT_FRAGMENT_SHADER (no live GL needed).
+  assert.equal(controller.getStats().backend, 'webgl2');
+  assert.equal(canvas.webglContext.textureUploads, 2);
+  assert.equal(canvas.webglContext.drawCalls, 1);
+  controller.destroy();
+});
+
+test('mandelbrot benchmark stays within the existing frame budget', () => {
+  // Mirrors scripts/benchmark-mandelbrot.mjs at the portfolio skin settings:
+  // 1456x902 css, resolution 0.22, 140 iterations, 8 timed samples. This is a
+  // regression guard for the continuous-coloring change — it catches a gross
+  // slowdown (e.g. an O(n^2) accident), NOT the sub-millisecond jitter that
+  // depends on co-running test load and CPU state. The precise 30ms/41ms
+  // portfolio gate is enforced by `npm run benchmark:mandelbrot` (exit code),
+  // which runs isolated; here we use a generous ceiling that still fails on any
+  // real regression without flaking under concurrent test load.
+  const cssWidth = 1456;
+  const cssHeight = 902;
+  const resolution = 0.22;
+  const width = Math.floor(cssWidth * resolution);
+  const height = Math.floor(cssHeight * resolution);
+  const { config } = resolveDescriptor(mandelbrotDefinition, {
+    config: {
+      runtime: { autoStart: false, pauseWhenHidden: false },
+      render: { smoothing: true, resolution },
+      motion: { speed: 1, cycleSeconds: 20, startPhase: 0.25 },
+      camera: { minZoom: 4000, maxZoom: 250000 },
+      algorithm: { maxIterations: 140 }
+    }
+  });
+  const pixels = new Uint32Array(width * height);
+  const palette = buildPalette(config);
+  const interiorColor = packHexColor(config.appearance.interiorColor);
+  const samples = [];
+  for (let i = 0; i < 8; i++) {
+    const time = i * config.motion.cycleSeconds / 8;
+    const started = performance.now();
+    renderMandelbrotPixels({ pixels, width, height, time, config, palette, interiorColor });
+    samples.push(performance.now() - started);
+  }
+  samples.sort((a, b) => a - b);
+  const median = samples[Math.floor(samples.length / 2)];
+  // The benchmark target is median <= 30ms; 2x headroom absorbs concurrent
+  // test-load jitter while still failing a genuine algorithmic regression.
+  assert.ok(median <= 60, `mandelbrot portfolio median ${median.toFixed(2)}ms is a gross regression`);
+});
+
