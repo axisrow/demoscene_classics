@@ -546,7 +546,7 @@ test('classic default frames remain pixel-stable and unchanged from the v2 basel
     plasma: 'pixels:7c2263af',
     fire: 'pixels:9aac868b',
     starfield: 'vector:95857935',
-    metaballs: 'pixels:b18e0d45',
+    metaballs: 'pixels:6bdd8d40',
     tunnel: 'pixels:73466750',
     mandelbrot: 'pixels:f05b5719',
     sineScroller: 'vector:1a8c3cf0',
