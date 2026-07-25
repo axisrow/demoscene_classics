@@ -598,73 +598,28 @@
   }
   var SINE_PHASE_OFFSETS = [0, 2 * Math.PI / 3, 4 * Math.PI / 3];
 
-  // src/effects/metaballs/renderer.js
-  function createMetaballsRenderer({ canvas, config }) {
-    const context = getContext2D(canvas, { alpha: false });
-    const buffer = createPixelBuffer();
-    const palette = buildGradientPalette(
-      new Uint32Array(config.appearance.colorCount),
-      config.appearance.palette
-    );
-    const points = config.field.points ?? Array.from(
-      { length: config.field.pointCount },
-      (_, index) => generatedPoint(index)
-    );
-    const pointX = new Float32Array(points.length);
-    const pointY = new Float32Array(points.length);
-    let width = 1;
-    let height = 1;
-    return {
-      resize(nextWidth, nextHeight) {
-        width = nextWidth;
-        height = nextHeight;
-        resizePixelBuffer(
-          buffer,
-          width * config.render.resolution,
-          height * config.render.resolution
-        );
-      },
-      render({ time }) {
-        const phase = time * 0.72 * config.motion.speed;
-        for (let i = 0; i < points.length; i++) {
-          const point = points[i];
-          pointX[i] = (Math.sin(phase * point.frequencyX + point.phaseX) * point.amplitudeX + 1) * 0.5 * buffer.width;
-          pointY[i] = (Math.sin(phase * point.frequencyY + point.phaseY) * point.amplitudeY + 1) * 0.5 * buffer.height;
-        }
-        let index = 0;
-        for (let y = 0; y < buffer.height; y++) {
-          for (let x = 0; x < buffer.width; x++) {
-            let value = 0;
-            for (let i = 0; i < points.length; i++) {
-              const dx = x - pointX[i];
-              const dy = y - pointY[i];
-              value += points[i].strength * config.field.fieldStrength / (dx * dx + dy * dy + 1);
-            }
-            value = value < config.field.threshold ? value * config.field.lowScale : config.field.lowScale + (value - config.field.threshold) * config.field.highScale;
-            const paletteIndex = Math.min(
-              palette.length - 1,
-              Math.max(0, Math.floor(value / 512 * palette.length))
-            );
-            buffer.pixels[index++] = palette[paletteIndex];
-          }
-        }
-        presentPixelBuffer(context, buffer, width, height, config.render.smoothing);
-      }
-    };
-  }
-  function generatedPoint(index) {
-    return {
-      amplitudeX: 0.6 + index * 0.13,
-      amplitudeY: 0.8 + index * 0.11,
-      frequencyX: 0.8 + index * 0.27,
-      frequencyY: 1.1 + index * 0.21,
-      phaseX: 0.7 + index * 1.7,
-      phaseY: 1.3 + index * 1.3,
-      strength: 240 + index * 60
-    };
-  }
-
   // src/effects/metaballs/config.js
+  var METABALLS_DEFAULTS = createEffectDefaults({
+    render: { resolution: 1 / 3, smoothing: false },
+    motion: { speed: 1 },
+    field: {
+      pointCount: 5,
+      points: null,
+      // Normalized field geometry. These four values are the algorithmic identity
+      // of the effect: they define relative blob size, peak field, where a body
+      // begins, and how softly two balls merge. Profiles may change pointCount /
+      // sampling, but must NOT override these (so relative radius + trajectory
+      // envelope are identical across all four responsive slots).
+      radius: 0.18,
+      // normalized blob radius
+      strength: 1,
+      // peak scalar contribution at a centre
+      threshold: 1,
+      // field level where a body begins (smoothstep edge)
+      mergeBand: 0.6
+      // smoothstep half-width → neck/merge softness
+    }
+  });
   var POINT_KEYS = /* @__PURE__ */ new Set([
     "amplitudeX",
     "amplitudeY",
@@ -674,23 +629,6 @@
     "phaseY",
     "strength"
   ]);
-  var METABALLS_DEFAULTS = createEffectDefaults({
-    render: { resolution: 1 / 3, smoothing: false },
-    motion: { speed: 1 },
-    appearance: {
-      palette: ["#050014", "#0a2878", "#00aac8", "#3ce678", "#f0e628", "#ffffff"],
-      colorCount: 512,
-      backgroundColor: "#050014"
-    },
-    field: {
-      pointCount: 5,
-      points: null,
-      fieldStrength: 1,
-      threshold: 1,
-      lowScale: 60,
-      highScale: 420
-    }
-  });
   function validateMetaballsInput(name, explicit) {
     if (explicit?.field?.points !== void 0 && explicit?.field?.pointCount !== void 0) {
       throw new RangeError(`${name}.field.pointCount and ${name}.field.points cannot be used together.`);
@@ -698,7 +636,8 @@
   }
   function validateMetaballs(config) {
     assertNumber(config.field.pointCount, "metaballs.field.pointCount", { min: 1, max: 64, integer: true });
-    for (const key of ["fieldStrength", "threshold", "lowScale", "highScale"]) {
+    assertNumber(config.field.radius, "metaballs.field.radius", { min: Number.MIN_VALUE, max: 1 });
+    for (const key of ["strength", "threshold", "mergeBand"]) {
       assertNumber(config.field[key], `metaballs.field.${key}`, { min: Number.MIN_VALUE });
     }
     if (config.field.points !== null) {
@@ -712,19 +651,131 @@
         for (const key of Object.keys(point)) {
           if (!POINT_KEYS.has(key)) throw new RangeError(`Unknown option: metaballs.field.points[${index}].${key}`);
         }
-        for (const key of POINT_KEYS) {
-          assertNumber(point[key], `metaballs.field.points[${index}].${key}`, {
-            min: key === "strength" ? Number.MIN_VALUE : -Infinity
-          });
+        for (const key of ["amplitudeX", "amplitudeY"]) {
+          assertNumber(point[key], `metaballs.field.points[${index}].${key}`, { min: 0, max: 1 });
         }
+        for (const key of ["frequencyX", "frequencyY", "phaseX", "phaseY"]) {
+          assertNumber(point[key], `metaballs.field.points[${index}].${key}`, { min: -Infinity });
+        }
+        assertNumber(point.strength, `metaballs.field.points[${index}].strength`, { min: Number.MIN_VALUE });
       });
       config.field.pointCount = config.field.points.length;
     }
   }
+  function smoothstep(edgeLow, edgeHigh, value) {
+    if (edgeHigh <= edgeLow) return value >= edgeHigh ? 1 : 0;
+    const t = Math.min(1, Math.max(0, (value - edgeLow) / (edgeHigh - edgeLow)));
+    return t * t * (3 - 2 * t);
+  }
+  function scalarContribution(r, radius, strength) {
+    const k = r / radius;
+    return strength / (1 + k * k);
+  }
+  function defaultPoint(index) {
+    return {
+      amplitudeX: 0.3 + Math.min(0.18, index * 0.06),
+      amplitudeY: 0.36 + Math.min(0.12, index * 0.05),
+      frequencyX: 0.8 + index * 0.27,
+      frequencyY: 1.1 + index * 0.21,
+      phaseX: 0.7 + index * 1.7,
+      phaseY: 1.3 + index * 1.3,
+      strength: 1
+    };
+  }
+
+  // src/effects/metaballs/renderer.js
+  function createMetaballsRenderer({ canvas, config }) {
+    const context = getContext2D(canvas, { alpha: false });
+    const buffer = createPixelBuffer();
+    const palette = buildGradientPalette(
+      new Uint32Array(config.appearance.colorCount),
+      config.appearance.palette
+    );
+    const points = config.field.points ?? Array.from(
+      { length: config.field.pointCount },
+      (_, index) => defaultPoint(index)
+    );
+    const uCentre = new Float32Array(points.length);
+    const vCentre = new Float32Array(points.length);
+    const pointStrength = new Float32Array(points.length);
+    for (let i = 0; i < points.length; i++) {
+      pointStrength[i] = points[i].strength * config.field.strength;
+    }
+    let uGrid = new Float32Array(0);
+    let vGrid = new Float32Array(0);
+    let sx = 1;
+    let sy = 1;
+    let outputWidth = 1;
+    let outputHeight = 1;
+    return {
+      resize(nextWidth, nextHeight) {
+        outputWidth = nextWidth;
+        outputHeight = nextHeight;
+        resizePixelBuffer(
+          buffer,
+          nextWidth * config.render.resolution,
+          nextHeight * config.render.resolution
+        );
+        const w = buffer.width;
+        const h = buffer.height;
+        const minD = Math.min(w, h);
+        sx = w / minD;
+        sy = h / minD;
+        uGrid = new Float32Array(w);
+        vGrid = new Float32Array(h);
+        for (let x = 0; x < w; x++) uGrid[x] = (x + 0.5) / w * sx;
+        for (let y = 0; y < h; y++) vGrid[y] = (y + 0.5) / h * sy;
+      },
+      render({ time }) {
+        const phase = time * 0.72 * config.motion.speed;
+        const radius = config.field.radius;
+        const edgeLow = config.field.threshold - config.field.mergeBand;
+        const edgeHigh = config.field.threshold + config.field.mergeBand;
+        for (let i = 0; i < points.length; i++) {
+          const point = points[i];
+          const cx = 0.5 + point.amplitudeX * Math.sin(phase * point.frequencyX + point.phaseX);
+          const cy = 0.5 + point.amplitudeY * Math.sin(phase * point.frequencyY + point.phaseY);
+          uCentre[i] = cx * sx;
+          vCentre[i] = cy * sy;
+        }
+        const paletteMax = palette.length - 1;
+        const n = points.length;
+        let index = 0;
+        for (let y = 0; y < buffer.height; y++) {
+          const v = vGrid[y];
+          for (let x = 0; x < buffer.width; x++) {
+            const u = uGrid[x];
+            let field = 0;
+            for (let i = 0; i < n; i++) {
+              const du = u - uCentre[i];
+              const dv = v - vCentre[i];
+              field += scalarContribution(Math.sqrt(du * du + dv * dv), radius, pointStrength[i]);
+            }
+            const t = smoothstep(edgeLow, edgeHigh, field);
+            const paletteIndex = Math.min(paletteMax, Math.max(0, Math.round(t * paletteMax)));
+            buffer.pixels[index++] = palette[paletteIndex];
+          }
+        }
+        presentPixelBuffer(context, buffer, outputWidth, outputHeight, config.render.smoothing);
+      }
+    };
+  }
 
   // src/effects/metaballs/skins.js
   var METABALLS_SKINS = Object.freeze({
-    classic: Object.freeze({})
+    classic: Object.freeze({
+      appearance: Object.freeze({
+        palette: Object.freeze([
+          "#050014",
+          "#0a2878",
+          "#00aac8",
+          "#3ce678",
+          "#f0e628",
+          "#ffffff"
+        ]),
+        colorCount: 512
+      })
+    })
   });
 
   // src/effects/profiles.js

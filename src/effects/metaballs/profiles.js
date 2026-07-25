@@ -1,18 +1,26 @@
 import { buildProfiles } from '../profiles.js';
 
-// Responsive profiles for metaballs. Four explicit, effect-owned slots — one
-// per (surface × device) combination. The scalar-field identity (field
-// strength, threshold, scales) is owned by config.js; profiles only tune
-// execution budgets and the point budget. Fullscreen slots keep the classic
-// composition (render.resolution stays at the 1/3 default, pointCount stays at
-// 5); preview slots lower the sampling cost and the point budget to the values
-// the gallery previously used, so the card shows the same gooey blobs with
-// fewer, cheaper metaballs.
+// Responsive profiles for metaballs (issue #8). Four explicit, effect-owned
+// slots — one per (surface × device) combination. The normalized scalar-field
+// IDENTITY (radius, strength, threshold, mergeBand) and the skin (colour ramp,
+// shading) are owned by config.js / skins.js; profiles only tune EXECUTION
+// budgets (maxFps, render resolution) and the POINT BUDGET.
+//
+// Because geometry is normalized, relative blob radius and the trajectory
+// envelope are IDENTICAL across all four slots — a profile change never
+// compensates for poor normalization with per-resolution radii. Preview slots
+// use fewer metaballs and coarser field sampling, but the Lissajous paths still
+// bring at least one pair close enough to merge by the 1.5 s / 5 s capture
+// (verified by the regenerated baselines).
+//
+// Fullscreen slots keep the classic composition (render.resolution stays at the
+// 1/3 default, pointCount stays at 5); preview slots lower the sampling cost
+// and the point budget to the values the gallery previously used, so the card
+// shows the same gooey blobs with fewer, cheaper metaballs.
 //
 // Initial runtime budgets (#3): preview/desktop 30 FPS, preview/mobile 24 FPS,
 // fullscreen/desktop 60 FPS, fullscreen/mobile 30 FPS. pixelRatio is pinned to
-// 1 and viewport auto-pause is enabled everywhere until the metaballs tuning
-// issue (#8) revisits them.
+// 1 and viewport auto-pause is enabled everywhere.
 
 const RUNTIME_FULLSCREEN_DESKTOP = { runtime: { maxFps: 60, pixelRatio: 1, pauseWhenHidden: true } };
 const RUNTIME_FULLSCREEN_MOBILE = { runtime: { maxFps: 30, pixelRatio: 1, pauseWhenHidden: true } };
