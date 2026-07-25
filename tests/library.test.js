@@ -57,6 +57,18 @@ class MockContext {
   }
   fillRect(...values) { this.record('fillRect', values); }
   clearRect(...values) { this.record('clearRect', values); }
+  // measureText returns deterministic metrics so sine-scroller's per-glyph path
+  // measurement produces a stable trace. It is not recorded (it queries metrics
+  // only and draws nothing).
+  measureText(character) {
+    return {
+      width: 10,
+      actualBoundingBoxAscent: 7,
+      actualBoundingBoxDescent: 2,
+      actualBoundingBoxLeft: 0,
+      actualBoundingBoxRight: 10
+    };
+  }
   beginPath() { this.record('beginPath'); }
   moveTo(...values) { this.record('moveTo', values); }
   lineTo(...values) { this.record('lineTo', values); }
@@ -530,13 +542,14 @@ test('legacy v2 flat options fail everywhere with an actionable migration messag
 });
 
 // Every effect's default descriptor (classic/fullscreen/desktop) must render a
-// stable, frozen signature. Five of the ten are still byte-identical to the v2
-// baseline; starfield (#7), plasma (#5), fire (#6), tunnel (#9), and
-// copperBars (#14) were each normalized/refined, so their signatures moved off
-// the v2 values and are now pinned to their normalized compositions below. The
-// effect-specific suites (tests/starfield.test.js, tests/plasma.test.js,
-// tests/fire-simulation.test.js, tests/tunnel.test.js, tests/copper-bars.test.js)
-// cover the normalized behavior in depth.
+// stable, frozen signature. Four of the ten are still byte-identical to the v2
+// baseline; starfield (#7), plasma (#5), fire (#6), tunnel (#9), copperBars
+// (#14), and sineScroller (#11) were each normalized/refined, so their
+// signatures moved off the v2 values and are now pinned to their normalized
+// compositions below. The effect-specific suites (tests/starfield.test.js,
+// tests/plasma.test.js, tests/fire-simulation.test.js, tests/tunnel.test.js,
+// tests/copper-bars.test.js, tests/sine-scroller.test.js) cover the normalized
+// behavior in depth.
 test('classic default frames remain pixel-stable and unchanged from the v2 baseline', async () => {
   const snapshots = {};
   for (const [name, , , filename] of EFFECTS) {
@@ -549,7 +562,7 @@ test('classic default frames remain pixel-stable and unchanged from the v2 basel
     metaballs: 'pixels:6bdd8d40',
     tunnel: 'pixels:73466750',
     mandelbrot: 'pixels:f05b5719',
-    sineScroller: 'vector:1a8c3cf0',
+    sineScroller: 'vector:5279a7a7',
     rotozoom: 'pixels:e199dbb2',
     feedback: 'vector:7e2ccd86',
     copperBars: 'pixels:7ac0c2b5'
