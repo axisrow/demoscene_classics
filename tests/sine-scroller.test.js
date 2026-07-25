@@ -458,3 +458,62 @@ test('deleted geometry fields are rejected as unknown options (resolver)', async
     /Unknown option: sineScroller\.text\.pixelSize/
   );
 });
+
+// --- J. regression: glyph raster scales with drawScale (no overlap on resize)
+
+test('the render font size scales with drawScale so glyphs do not overlap on a low-res buffer', () => {
+  // Glyph POSITIONS are mapped into backing-buffer space with drawScale, so the
+  // glyph RASTER (the font size) must scale by the SAME factor — otherwise the
+  // buffer (rendered smaller, then upscaled by drawImage) grows glyphs out of
+  // proportion to their spacing. At resolution 0.7 the render font must be
+  // fontSize * 0.7 (buffer px), which presentDrawingBuffer upscales back to the
+  // logical size; the desktop resolution 1.0 leaves it at fontSize.
+  const renderFontPx = (resolution) => {
+    const m = mount(320, 180, { render: { resolution } });
+    m.renderer.render({ time: 0, delta: 0 });
+    const font = m.buffer.context.font; // e.g. "900 22.4px Courier New, monospace"
+    const px = Number.parseFloat(font.match(/([\d.]+)px/)[1]);
+    return px;
+  };
+  // Logical font size for a 180-tall short side at ratio 0.16, clamped to [10,96].
+  const logical = resolveFontSize(180, SINE_SCROLLER_DEFAULTS.text);
+  const r1 = renderFontPx(1);
+  const r07 = renderFontPx(0.7);
+  assert.ok(Math.abs(r1 - logical) < 0.01, `res 1.0 font ${r1} ~= logical ${logical}`);
+  assert.ok(Math.abs(r07 - logical * 0.7) < 0.01, `res 0.7 font ${r07} ~= logical*0.7 ${logical * 0.7}`);
+  // The render font scales with drawScale, so glyph raster tracks glyph spacing.
+  assert.ok(Math.abs(r07 / r1 - 0.7) < 0.01, 'render font scales with resolution');
+});
+
+// --- K. regression: star budget is bounded (no unbounded allocation) --------
+
+test('resolveStarCount never returns more than the 5000 hard cap, regardless of density config', () => {
+  // A caller can set a huge densityMax/densityPerUnitArea via the config escape
+  // hatch. resolveStarCount must defensively clamp so resize() never runs
+  // `new Array(huge)` and hang/OOM the browser.
+  const huge = {
+    densityMode: 'area',
+    densityPerUnitArea: 1e9,
+    densityMin: 0,
+    densityMax: 1e9,
+    count: 1e9
+  };
+  assert.ok(resolveStarCount(huge, 1280 * 720) <= 5000, 'area mode capped at 5000');
+  const hugeExplicit = { densityMode: 'explicit', count: 1e9 };
+  assert.ok(resolveStarCount(hugeExplicit, 99999) <= 5000, 'explicit mode capped at 5000');
+});
+
+test('validateSineScroller rejects a densityMax above the 5000 cap', () => {
+  const base = configWith();
+  assert.throws(
+    () => validateSineScroller({ ...base, stars: { ...base.stars, densityMax: 10000 } }),
+    /densityMax/
+  );
+  // The four profile slots all stay within the cap.
+  for (const key of ['fullscreen.desktop', 'fullscreen.mobile', 'preview.desktop', 'preview.mobile']) {
+    const slot = SINE_SCROLLER_PROFILES.slots[key];
+    assert.ok(slot.stars.densityMax === undefined || slot.stars.densityMax <= 5000,
+      `${key} densityMax within cap`);
+  }
+});
+

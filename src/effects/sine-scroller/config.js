@@ -151,9 +151,12 @@ export function resolveGlyphHalfExtent(glyphHeight, shortSide, text) {
  * @returns {number}
  */
 export function resolveStarCount(stars, area) {
-  if (stars.densityMode !== 'area') return stars.count;
+  if (stars.densityMode !== 'area') return Math.min(stars.count, 5000);
   const derived = Math.round(stars.densityPerUnitArea * Math.max(0, area) / 1000);
-  return Math.min(stars.densityMax, Math.max(stars.densityMin, derived));
+  // Defensive hard cap: even if a caller bypasses validation, the renderer must
+  // never allocate an unbounded array (new Array(count)) — that hangs/OOMs the
+  // browser. The validated ceiling is 5000 (matches `count`).
+  return Math.min(5000, Math.min(stars.densityMax, Math.max(stars.densityMin, derived)));
 }
 
 /**
@@ -192,6 +195,7 @@ export function validateSineScroller(config) {
   assertNumber(config.stars.densityMin, 'sineScroller.stars.densityMin', { min: 0, max: 5000, integer: true });
   assertNumber(config.stars.densityMax, 'sineScroller.stars.densityMax', {
     min: config.stars.densityMin,
+    max: 5000,
     integer: true
   });
   for (const key of ['speed', 'minDepth', 'maxDepth', 'minSize', 'maxSize']) {

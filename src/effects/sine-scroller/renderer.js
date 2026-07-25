@@ -193,7 +193,14 @@ export function createSineScrollerRenderer({ canvas, config }) {
         config.text.fontSizeMax,
         Math.max(config.text.fontSizeMin, shortSide * config.text.fontSizeRatio)
       );
-      context.font = `${config.appearance.fontWeight} ${fontSize}px ${config.appearance.fontFamily}`;
+      // Glyph POSITIONS are mapped into backing-buffer space with `drawScale`
+      // (leftX * drawScale, y * drawScale). The glyph RASTER must scale by the
+      // SAME factor, or the buffer (rendered at a smaller resolution) is upscaled
+      // by presentDrawingBuffer and the glyphs grow out of proportion to their
+      // spacing and overlap. So the render font size is `fontSize * drawScale`
+      // while the cached advances stay in LOGICAL units (used for logical scroll
+      // math and path-fraction wave placement).
+      context.font = `${config.appearance.fontWeight} ${fontSize * drawScale}px ${config.appearance.fontFamily}`;
       context.textBaseline = 'middle';
       context.textAlign = 'left';
 

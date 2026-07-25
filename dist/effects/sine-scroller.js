@@ -659,9 +659,9 @@
     }
   });
   function resolveStarCount(stars, area) {
-    if (stars.densityMode !== "area") return stars.count;
+    if (stars.densityMode !== "area") return Math.min(stars.count, 5e3);
     const derived = Math.round(stars.densityPerUnitArea * Math.max(0, area) / 1e3);
-    return Math.min(stars.densityMax, Math.max(stars.densityMin, derived));
+    return Math.min(5e3, Math.min(stars.densityMax, Math.max(stars.densityMin, derived)));
   }
   function validateSineScroller(config) {
     assertString(config.text.content, "sineScroller.text.content");
@@ -695,6 +695,7 @@
     assertNumber(config.stars.densityMin, "sineScroller.stars.densityMin", { min: 0, max: 5e3, integer: true });
     assertNumber(config.stars.densityMax, "sineScroller.stars.densityMax", {
       min: config.stars.densityMin,
+      max: 5e3,
       integer: true
     });
     for (const key of ["speed", "minDepth", "maxDepth", "minSize", "maxSize"]) {
@@ -802,7 +803,7 @@
           config.text.fontSizeMax,
           Math.max(config.text.fontSizeMin, shortSide * config.text.fontSizeRatio)
         );
-        context.font = `${config.appearance.fontWeight} ${fontSize}px ${config.appearance.fontFamily}`;
+        context.font = `${config.appearance.fontWeight} ${fontSize * drawScale}px ${config.appearance.fontFamily}`;
         context.textBaseline = "middle";
         context.textAlign = "left";
         const content = config.text.content;
