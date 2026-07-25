@@ -55,7 +55,10 @@ export const ROTOZOOM_DEFAULTS = createEffectDefaults({
     // Number of whole texture tiles repeated across one viewport HEIGHT. The
     // transform maps viewport units to texture-tile units by `tiles`, so the
     // tile scale depends on viewport extent (a composition choice), never on
-    // backing-buffer pixels.
+    // backing-buffer pixels. Capped at 50: beyond that, per-tile sampling on
+    // the smallest preview buffer (320x180) undersamples the lattice into
+    // moiré or a near-flat wash — exactly what issue #12 asks the texture to
+    // avoid.
     tiles: 5,
     // INTEGER cycle counts of the sine lattice across one tile. Integer counts
     // guarantee seamlessness at the tile wrap. Two near-odd coprime frequencies
@@ -88,7 +91,7 @@ export function validateRotozoom(config) {
   for (const key of ['centerX', 'centerY']) {
     assertNumber(config.transform[key], `rotozoom.transform.${key}`, { min: 0, max: 1 });
   }
-  assertNumber(config.texture.tiles, 'rotozoom.texture.tiles', { min: 0.5 });
+  assertNumber(config.texture.tiles, 'rotozoom.texture.tiles', { min: 0.5, max: 50 });
   // Integer frequencies guarantee a seamless tile; reject fractional counts so
   // a misconfigured skin cannot silently introduce a wrap seam.
   for (const key of ['frequencyU', 'frequencyV']) {

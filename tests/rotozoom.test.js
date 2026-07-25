@@ -580,6 +580,12 @@ test('validateRotozoom accepts defaults and rejects out-of-range geometry', () =
     () => validateRotozoom({ ...base, texture: { ...base.texture, weightU: 5 } }),
     /weightU/
   );
+  // tiles upper bound: beyond ~50 the smallest preview buffer undersamples the
+  // lattice into moiré / a near-flat wash (issue #12 rejects both).
+  assert.throws(
+    () => validateRotozoom({ ...base, texture: { ...base.texture, tiles: 500 } }),
+    /tiles/
+  );
   assert.throws(
     () => validateRotozoom({ ...base, appearance: { ...base.appearance, contrast: 0 } }),
     /contrast/

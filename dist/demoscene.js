@@ -2733,7 +2733,10 @@ void main() {
       // Number of whole texture tiles repeated across one viewport HEIGHT. The
       // transform maps viewport units to texture-tile units by `tiles`, so the
       // tile scale depends on viewport extent (a composition choice), never on
-      // backing-buffer pixels.
+      // backing-buffer pixels. Capped at 50: beyond that, per-tile sampling on
+      // the smallest preview buffer (320x180) undersamples the lattice into
+      // moiré or a near-flat wash — exactly what issue #12 asks the texture to
+      // avoid.
       tiles: 5,
       // INTEGER cycle counts of the sine lattice across one tile. Integer counts
       // guarantee seamlessness at the tile wrap. Two near-odd coprime frequencies
@@ -2759,7 +2762,7 @@ void main() {
     for (const key of ["centerX", "centerY"]) {
       assertNumber(config.transform[key], `rotozoom.transform.${key}`, { min: 0, max: 1 });
     }
-    assertNumber(config.texture.tiles, "rotozoom.texture.tiles", { min: 0.5 });
+    assertNumber(config.texture.tiles, "rotozoom.texture.tiles", { min: 0.5, max: 50 });
     for (const key of ["frequencyU", "frequencyV"]) {
       assertNumber(config.texture[key], `rotozoom.texture.${key}`, { min: 1, max: 32, integer: true });
     }
