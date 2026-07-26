@@ -38,6 +38,12 @@ jobs:
       - run: npm run test:visual:unit
       - run: npm run test:visual
 
+      # Gallery presentation screenshots (issue #15): the decorated index.html at
+      # desktop-landscape + mobile-portrait viewports, compared against the
+      # gallery baselines independently of the effect baselines. Reuses the same
+      # pinned Playwright runtime installed above.
+      - run: npm run test:gallery:visual
+
       # On failure, upload the diff images and review contact sheets so a human
       # can triage without re-running. Raw captures and review sheets are kept
       # as separate artifacts.
@@ -63,4 +69,12 @@ jobs:
         with:
           name: visual-captures
           path: visual/captures/
+          if-no-files-found: ignore
+
+      - name: Upload gallery diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gallery-diffs
+          path: visual/diffs/gallery/
           if-no-files-found: ignore
