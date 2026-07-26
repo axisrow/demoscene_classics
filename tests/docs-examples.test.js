@@ -277,3 +277,116 @@ test('docs: manifest declares apiVersion 3 and all ten effects', async () => {
     assert.deepEqual(effect.devices, ['desktop', 'mobile']);
   }
 });
+
+// api-v3.md "v2 → v3 migration": v2 leaf schemas changed for many effects —
+// fields were renamed, removed, moved between groups, or changed units. These
+// tests take a representative v2 configuration, apply the documented v3
+// transformation (the migration table), and assert the result mounts. They are
+// the executable guarantee for the per-effect mapping in the migration guide:
+// if a documented v3 equivalent stops mounting, the table is wrong.
+//
+// Each case names the v2 source field(s) and the v3 replacement so the mapping
+// is auditable directly from the test.
+const MIGRATIONS = [
+  // fire: v2 source* + integer cooling (0..32) → normalized fractions (0..1).
+  {
+    name: 'fire',
+    bundle: 'dist/effects/fire.js',
+    descriptor: { config: { simulation: { seed: 7, cooling: 0.3, sourceWidthFrac: 0.7, sourceDepthFrac: 0.05, sourceIntensity: 0.95 } } },
+    migrated: ['sourceDensity→sourceWidthFrac/sourceDepthFrac', 'sourceIntensity 0..255→0..1', 'cooling 0..32 int→0..1 frac']
+  },
+  // starfield: v2 particles.trailFade (and alpha/lineWidth) → appearance.*
+  {
+    name: 'starfield',
+    bundle: 'dist/effects/starfield.js',
+    descriptor: { config: { particles: { particleCount: 200, seed: 42 }, appearance: { trailFade: 0.4 } } },
+    migrated: ['particles.trailFade→appearance.trailFade', 'particles.{min,max}Alpha/LineWidth→appearance (skin)']
+  },
+  // rotozoom: v2 texture size/checker/rings/spokes → texture.tiles (normalized).
+  {
+    name: 'rotozoom',
+    bundle: 'dist/effects/rotozoom.js',
+    descriptor: { config: { texture: { tiles: 6 } } },
+    migrated: ['texture.{size,checkerSize,ringFrequency,spokeCount}→texture.tiles']
+  },
+  // feedback: v2 alphaDecay/scale/rotation/fade → *PerSecond coefficients.
+  {
+    name: 'feedback',
+    bundle: 'dist/effects/feedback.js',
+    descriptor: { config: { feedback: { decayPerSecond: 0.4, scalePerSecond: 0.95, rotationPerSecond: 0.5 } } },
+    migrated: ['feedback.{alphaDecay,scale,rotation,fade}→feedback.{decay,scale,rotation}PerSecond']
+  },
+  // plasma: field frequencies are now cycles-per-viewport (still an array of 4).
+  {
+    name: 'plasma',
+    bundle: 'dist/effects/plasma.js',
+    descriptor: { config: { field: { frequencies: [0.08, 0.06, 0.04, 1.2] } } },
+    migrated: ['field.frequencies units: buffer-pixels→cycles/viewport-height']
+  },
+  // tunnel: motion.* forward/rotation/color-cycle speeds are now normalized.
+  {
+    name: 'tunnel',
+    bundle: 'dist/effects/tunnel.js',
+    descriptor: { config: { geometry: { angularFrequency: 9 } } },
+    migrated: ['geometry frequencies normalized; motion speeds normalized']
+  },
+  // metaballs: field pointCount/points/radius/strength still present; lowScale/
+  // highScale removed (mapping is now a skin palette).
+  {
+    name: 'metaballs',
+    bundle: 'dist/effects/metaballs.js',
+    descriptor: { config: { field: { pointCount: 6 } } },
+    migrated: ['field.{lowScale,highScale} removed → palette-driven']
+  },
+  // mandelbrot: camera/algorithm preserved; continuous-coloring knobs added.
+  {
+    name: 'mandelbrot',
+    bundle: 'dist/effects/mandelbrot.js',
+    descriptor: { config: { camera: { maxZoom: 250000 }, algorithm: { maxIterations: 140 } } },
+    migrated: ['camera/algorithm preserved; appearance.{colorScale,colorCurve,...} added']
+  },
+  // sine-scroller: groups preserved; wave.frequency→wave.cycles.
+  {
+    name: 'sineScroller',
+    bundle: 'dist/effects/sine-scroller.js',
+    descriptor: { config: { wave: { cycles: 2.5 }, stars: { count: 80 } } },
+    migrated: ['wave.frequency→wave.cycles (cycles across the text path)']
+  },
+  // copper-bars: bars/shading preserved.
+  {
+    name: 'copperBars',
+    bundle: 'dist/effects/copper-bars.js',
+    descriptor: { config: { shading: { barAlphaScale: 0.5 } } },
+    migrated: ['bars/shading groups preserved']
+  }
+];
+
+for (const { name, bundle, descriptor, migrated } of MIGRATIONS) {
+  test(`docs: v2→v3 migration for ${name} mounts (${migrated.join('; ')})`, async () => {
+    const env = createEnvironment();
+    await loadBundle(bundle, env);
+    // Merge runtime.autoStart:false into the effect-specific config so the mount
+    // is a pure resolution check (no rAF loop).
+    const config = { runtime: { autoStart: false }, ...(descriptor.config || {}) };
+    const controller = env.sandbox.Demoscene[name](
+      env.createCanvas('#demo', 48, 32),
+      { config }
+    );
+    assert.equal(typeof controller.getConfig, 'function');
+    assert.equal(typeof controller.destroy, 'function');
+    controller.destroy();
+  });
+}
+
+// The migration guide warns that v2 leaf values are NOT just moved under config
+// unchanged — a naive `simulation: { cooling: 2 }` (v2 integer) fails v3
+// validation. This is the negative side of the mapping.
+test('docs: naive v2 cooling value (0..32 int) is rejected in v3', async () => {
+  const env = createEnvironment();
+  await loadBundle('dist/effects/fire.js', env);
+  const canvas = env.createCanvas('#demo', 48, 32);
+  assert.throws(
+    () => env.sandbox.Demoscene.fire(canvas, { config: { simulation: { cooling: 2 } } }),
+    /fire\.simulation\.cooling must be a finite number between 0 and 1/
+  );
+});

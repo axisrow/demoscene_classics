@@ -242,9 +242,11 @@ For a descriptor `{ skin, surface, device, config }`, `resolveDescriptor`
    descriptor (fullscreen default). Add a card to `index.html`.
 7. **Update the README.** Add the effect to the function list and the
    effect-specific groups table.
-8. **Add tests.** Effect-specific behaviour in `tests/<name>.test.js`; the
-   shared `tests/library.test.js` enumerates all effects, so it picks up the
-   new one automatically once it is in the build `effects` array.
+8. **Add tests.** Effect-specific behaviour in `tests/<name>.test.js`. The
+   shared `tests/library.test.js` keeps its **own** `EFFECTS` array (it is not
+   derived from `scripts/build.mjs`), so add a row for the new effect there too
+   — then the cross-cutting contract tests (definition shape, profile slots,
+   merge precedence, legacy rejection, default-frame signatures) cover it.
 9. **Rebuild and commit `dist/`.** Run `npm run build`; never hand-edit
    `dist/`. Commit the regenerated `dist/demoscene.js`, `dist/effects/<name>.js`,
    and `dist/manifest.json` (now listing the new effect).

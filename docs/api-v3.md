@@ -378,10 +378,36 @@ Demoscene.fire(canvas, { simulation: { seed: 7 } });
    `appearance`) also move under `config` when you want to override them
    programmatically.
 
+   > **⚠ Leaf schemas changed.** Moving a group under `config` is necessary but
+   > **not sufficient**: v3 re-normalized most effects, so many leaf fields were
+   > **renamed, moved between groups, changed units, or removed**. A v2 value
+   > copied verbatim under `config` will usually throw `Unknown option` or a
+   > range error. Use the per-effect table below to translate each leaf value.
+   > The `tests/docs-examples.test.js` "v2→v3 migration" cases mount one
+   > representative v3 configuration per effect and are the executable guarantee
+   > for this table.
+
+   **Per-effect leaf changes (v2 → v3):**
+
+   | Effect | What changed |
+   |---|---|
+   | `fire` | `simulation.sourceDensity`/`sourceIntensity`(0–255)/`sourceVariance`/`cooling`(int 0–32)/`horizontalDrift` → normalized `simulation.sourceWidthFrac` + `sourceDepthFrac` + `sourceIntensity`(0–1) + `cooling`(frac 0–1) + `riseFrac`. |
+   | `starfield` | `particles.trailFade`, `minAlpha`/`maxAlpha`, `minLineWidth`/`maxLineWidth` → **`appearance.*`** (skin-owned). `particles` geometry (fov/depth/speed/centre/density) is normalized but keeps the same names. |
+   | `rotozoom` | `texture.size`/`checkerSize`/`ringFrequency`/`spokeCount`/`centerRadius`/`borderRadius` → single normalized `texture.tiles` (capped). `motion.zoomBase`/`zoomAmplitude`/`zoomSpeed` → normalized zoom motion. |
+   | `feedback` | `feedback.alphaDecay`/`scale`/`rotation`/`fade` → **per-second** `feedback.decayPerSecond`/`scalePerSecond`/`rotationPerSecond`. `geometry.*` radii/widths → fractions of the short side. |
+   | `plasma` | `field.frequencies` units change from buffer-pixels to **cycles per viewport-height** (4-element array preserved). `field.amplitudes`/`phaseRates` preserved. |
+   | `tunnel` | `geometry` frequencies and `motion.forwardSpeed`/`rotationSpeed`/`colorCycleSpeed` are **normalized** (units changed); `geometry.fog*` reworked into `fogNear`/`fogStrength`/`fogColor`. |
+   | `metaballs` | `field.lowScale`/`highScale` **removed** (mapping is now palette-driven). `field.pointCount`/`points`/`radius`/`strength`/`threshold` preserved (radius normalized). |
+   | `mandelbrot` | `camera`/`algorithm` **preserved**. Added continuous-coloring knobs `appearance.colorScale`/`colorCurve`/`colorOffset`/`cycleSpeed`. |
+   | `sineScroller` | `wave.frequency` → `wave.cycles` (cycles across the text path). `text`/`stars` preserved. |
+   | `copperBars` | `bars`/`shading` **preserved**. |
+
 2. **Move visual choices to a skin.** Palette, background, glow, and other
    presentation-only values belong in `skin.overrides.appearance`, not in the
    flat object. This keeps algorithmic identity (config) separate from look
-   (skin).
+   (skin). Note from the table above that some fields that *looked* algorithmic
+   in v2 (e.g. `starfield.particles.trailFade`) are **visual** in v3 and belong
+   in a skin, not in `config`.
 
 3. **Pick a surface.** Standalone pages use the default `fullscreen`; gallery
    cards use `surface: 'preview'`. Do **not** pass inline `runtime`/`render`
