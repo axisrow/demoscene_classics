@@ -1,0 +1,27 @@
+{
+  "generatedAt": "2026-07-26T03:28:10.989Z",
+  "playwrightVersion": "1.59.0",
+  "chromiumBuild": "1217",
+  "maturitySeconds": 5,
+  "captureCount": 2,
+  "captures": [
+    {
+      "file": "visual/baselines/gallery/gallery__desktop__1280x800.png",
+      "sha256": "f7ed6ca11b8752db488f87e8ea1c972590c6614ee898789c891dea13d790028b",
+      "size": 504304,
+      "view": "desktop",
+      "steps": 300,
+      "chromiumBuild": "1217",
+      "playwrightVersion": "1.59.0"
+    },
+    {
+      "file": "visual/baselines/gallery/gallery__mobile__390x844.png",
+      "sha256": "9ac8bc756121258baaee3ca6cabffb972330290044c20c58d8a90b3e056ab840",
+      "size": 679493,
+      "view": "mobile",
+      "steps": 300,
+      "chromiumBuild": "1217",
+      "playwrightVersion": "1.59.0"
+    }
+  ]
+}

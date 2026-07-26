@@ -52,7 +52,10 @@ for (const [index, effect] of EFFECTS.entries()) {
   grid.appendChild(card);
   // Mount the preview profile for this card. Isolate each mount so one effect
   // that fails to resolve or mount (a profile/descriptor regression) degrades
-  // only its own card instead of aborting the whole gallery loop.
+  // only its own card instead of aborting the whole gallery loop. A failure
+  // surfaces an accessible in-place notice (role=status) WITHOUT replacing any
+  // successful canvas or disrupting the grid: the .preview box keeps its
+  // aspect-ratio, so the failed card reserves the same height as a healthy one.
   try {
     Demoscene[effect.api](card.querySelector('canvas'), {
       surface: 'preview',
@@ -60,6 +63,16 @@ for (const [index, effect] of EFFECTS.entries()) {
     });
   } catch (error) {
     console.error(`Failed to mount preview for ${effect.api}:`, error);
+    const preview = card.querySelector('.preview');
+    const canvas = card.querySelector('canvas');
+    if (canvas) canvas.remove();
+    if (preview) {
+      const notice = document.createElement('div');
+      notice.className = 'preview-error';
+      notice.setAttribute('role', 'status');
+      notice.textContent = 'preview unavailable';
+      preview.appendChild(notice);
+    }
   }
 }
 </script>

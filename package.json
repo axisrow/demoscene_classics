@@ -13,7 +13,10 @@
     "test:visual:unit": "node --test tests/visual-matrix.test.js tests/visual-pixel.test.js tests/visual-outpath.test.js tests/webgl-smoke.test.js",
     "test:visual": "npm run build && node scripts/visual-capture.mjs --out visual/captures && node scripts/visual-compare.mjs",
     "visual:update": "npm run build && node scripts/visual-capture.mjs --out visual/baselines && node scripts/visual-contact-sheet.mjs --source visual/baselines",
-    "visual:contact-sheet": "node scripts/visual-contact-sheet.mjs"
+    "visual:contact-sheet": "node scripts/visual-contact-sheet.mjs",
+    "test:gallery": "node --test tests/gallery-presentation.test.js",
+    "test:gallery:visual": "npm run build && node scripts/gallery-capture.mjs --out visual/captures/gallery && node scripts/gallery-compare.mjs",
+    "gallery:update": "npm run build && node scripts/gallery-capture.mjs --out visual/baselines/gallery"
   },
   "devDependencies": {
     "esbuild": "^0.25.0"
