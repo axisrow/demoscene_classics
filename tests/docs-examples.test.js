@@ -280,100 +280,138 @@ test('docs: manifest declares apiVersion 3 and all ten effects', async () => {
 
 // api-v3.md "v2 → v3 migration": v2 leaf schemas changed for many effects —
 // fields were renamed, removed, moved between groups, or changed units. These
-// tests take a representative v2 configuration, apply the documented v3
-// transformation (the migration table), and assert the result mounts. They are
-// the executable guarantee for the per-effect mapping in the migration guide:
-// if a documented v3 equivalent stops mounting, the table is wrong.
+// tests are the executable guarantee for the per-effect mapping table: each
+// case (a) asserts a renamed/removed/moved v2 leaf is REJECTED with "Unknown
+// option", and (b) mounts the documented v3 replacement and asserts the value
+// lands at its exact resolved path via getConfig(). If a mapping in the table is
+// wrong, one of these fails.
 //
-// Each case names the v2 source field(s) and the v3 replacement so the mapping
-// is auditable directly from the test.
+// v2 schemas come from commit 0eb96f8 (the v2 release); v3 schemas from the
+// final src/effects/<name>/config.js.
 const MIGRATIONS = [
-  // fire: v2 source* + integer cooling (0..32) → normalized fractions (0..1).
   {
     name: 'fire',
     bundle: 'dist/effects/fire.js',
-    descriptor: { config: { simulation: { seed: 7, cooling: 0.3, sourceWidthFrac: 0.7, sourceDepthFrac: 0.05, sourceIntensity: 0.95 } } },
-    migrated: ['sourceDensity→sourceWidthFrac/sourceDepthFrac', 'sourceIntensity 0..255→0..1', 'cooling 0..32 int→0..1 frac']
+    // v2 simulation.sourceDensity / integer cooling (0..32) are gone in v3.
+    rejected: [{ config: { simulation: { sourceDensity: 0.6 } } }, /Unknown option: fire\.simulation\.sourceDensity/],
+    // v3 replacement: normalized source geometry + fractional cooling.
+    mount: { config: { simulation: { cooling: 0.3, sourceWidthFrac: 0.7, sourceIntensity: 0.95 } } },
+    assert: (cfg) => { assert.equal(cfg.simulation.cooling, 0.3); assert.equal(cfg.simulation.sourceWidthFrac, 0.7); }
   },
-  // starfield: v2 particles.trailFade (and alpha/lineWidth) → appearance.*
   {
     name: 'starfield',
     bundle: 'dist/effects/starfield.js',
-    descriptor: { config: { particles: { particleCount: 200, seed: 42 }, appearance: { trailFade: 0.4 } } },
-    migrated: ['particles.trailFade→appearance.trailFade', 'particles.{min,max}Alpha/LineWidth→appearance (skin)']
+    // v2 particles.trailFade moved to appearance (skin-owned).
+    rejected: [{ config: { particles: { trailFade: 0.4 } } }, /Unknown option: starfield\.particles\.trailFade/],
+    mount: { config: { appearance: { trailFade: 0.4 } } },
+    assert: (cfg) => { assert.equal(cfg.appearance.trailFade, 0.4); }
   },
-  // rotozoom: v2 texture size/checker/rings/spokes → texture.tiles (normalized).
   {
     name: 'rotozoom',
     bundle: 'dist/effects/rotozoom.js',
-    descriptor: { config: { texture: { tiles: 6 } } },
-    migrated: ['texture.{size,checkerSize,ringFrequency,spokeCount}→texture.tiles']
+    // v2 texture.{size,checkerSize,ringFrequency,spokeCount} collapsed to texture.tiles.
+    rejected: [{ config: { texture: { checkerSize: 32 } } }, /Unknown option: rotozoom\.texture\.checkerSize/],
+    mount: { config: { texture: { tiles: 6 } } },
+    assert: (cfg) => { assert.equal(cfg.texture.tiles, 6); }
   },
-  // feedback: v2 alphaDecay/scale/rotation/fade → *PerSecond coefficients.
   {
     name: 'feedback',
     bundle: 'dist/effects/feedback.js',
-    descriptor: { config: { feedback: { decayPerSecond: 0.4, scalePerSecond: 0.95, rotationPerSecond: 0.5 } } },
-    migrated: ['feedback.{alphaDecay,scale,rotation,fade}→feedback.{decay,scale,rotation}PerSecond']
+    // v2 feedback.{alphaDecay,scale,rotation,fade} → per-second coefficients.
+    rejected: [{ config: { feedback: { alphaDecay: 0.9 } } }, /Unknown option: feedback\.feedback\.alphaDecay/],
+    mount: { config: { feedback: { decayPerSecond: 0.4, scalePerSecond: 0.95, rotationPerSecond: 0.5 } } },
+    assert: (cfg) => {
+      assert.equal(cfg.feedback.decayPerSecond, 0.4);
+      assert.equal(cfg.feedback.scalePerSecond, 0.95);
+      assert.equal(cfg.feedback.rotationPerSecond, 0.5);
+    }
   },
-  // plasma: field frequencies are now cycles-per-viewport (still an array of 4).
   {
     name: 'plasma',
     bundle: 'dist/effects/plasma.js',
-    descriptor: { config: { field: { frequencies: [0.08, 0.06, 0.04, 1.2] } } },
-    migrated: ['field.frequencies units: buffer-pixels→cycles/viewport-height']
+    // field.frequencies is still an array of 4, but its units are now
+    // cycles-per-viewport-height (no rename — this case guards the preserved name).
+    mount: { config: { field: { frequencies: [3, 3, 2, 2.5] } } },
+    assert: (cfg) => { assert.deepEqual([...cfg.field.frequencies], [3, 3, 2, 2.5]); }
   },
-  // tunnel: motion.* forward/rotation/color-cycle speeds are now normalized.
   {
     name: 'tunnel',
     bundle: 'dist/effects/tunnel.js',
-    descriptor: { config: { geometry: { angularFrequency: 9 } } },
-    migrated: ['geometry frequencies normalized; motion speeds normalized']
+    // v2 geometry.radialFrequency → geometry.wallFrequency; fog fields reworked.
+    rejected: [{ config: { geometry: { radialFrequency: 60 } } }, /Unknown option: tunnel\.geometry\.radialFrequency/],
+    mount: { config: { geometry: { wallFrequency: 4 } } },
+    assert: (cfg) => { assert.equal(cfg.geometry.wallFrequency, 4); }
   },
-  // metaballs: field pointCount/points/radius/strength still present; lowScale/
-  // highScale removed (mapping is now a skin palette).
   {
     name: 'metaballs',
     bundle: 'dist/effects/metaballs.js',
-    descriptor: { config: { field: { pointCount: 6 } } },
-    migrated: ['field.{lowScale,highScale} removed → palette-driven']
+    // v2 field.fieldStrength → field.strength; v2 had no field.radius; lowScale/
+    // highScale removed (mapping is now palette-driven).
+    rejected: [
+      [{ config: { field: { fieldStrength: 1 } } }, /Unknown option: metaballs\.field\.fieldStrength/],
+      [{ config: { field: { lowScale: 60 } } }, /Unknown option: metaballs\.field\.lowScale/]
+    ],
+    mount: { config: { field: { radius: 0.2, strength: 1.2 } } },
+    assert: (cfg) => { assert.equal(cfg.field.radius, 0.2); assert.equal(cfg.field.strength, 1.2); }
   },
-  // mandelbrot: camera/algorithm preserved; continuous-coloring knobs added.
   {
     name: 'mandelbrot',
     bundle: 'dist/effects/mandelbrot.js',
-    descriptor: { config: { camera: { maxZoom: 250000 }, algorithm: { maxIterations: 140 } } },
-    migrated: ['camera/algorithm preserved; appearance.{colorScale,colorCurve,...} added']
+    // camera/algorithm names are preserved; continuous-coloring knobs were added.
+    mount: { config: { camera: { maxZoom: 250000 }, algorithm: { maxIterations: 140 }, appearance: { colorScale: 0.5 } } },
+    assert: (cfg) => {
+      assert.equal(cfg.camera.maxZoom, 250000);
+      assert.equal(cfg.algorithm.maxIterations, 140);
+      assert.equal(cfg.appearance.colorScale, 0.5);
+    }
   },
-  // sine-scroller: groups preserved; wave.frequency→wave.cycles.
   {
     name: 'sineScroller',
     bundle: 'dist/effects/sine-scroller.js',
-    descriptor: { config: { wave: { cycles: 2.5 }, stars: { count: 80 } } },
-    migrated: ['wave.frequency→wave.cycles (cycles across the text path)']
+    // v2 text.maxFontSize → text.fontSizeMax; text.fontFamily/fontWeight → appearance.
+    rejected: [
+      [{ config: { text: { maxFontSize: 72 } } }, /Unknown option: sineScroller\.text\.maxFontSize/],
+      [{ config: { text: { fontFamily: 'monospace' } } }, /Unknown option: sineScroller\.text\.fontFamily/]
+    ],
+    mount: { config: { text: { fontSizeMax: 96 }, appearance: { fontFamily: 'monospace' } } },
+    assert: (cfg) => {
+      assert.equal(cfg.text.fontSizeMax, 96);
+      assert.equal(cfg.appearance.fontFamily, 'monospace');
+    }
   },
-  // copper-bars: bars/shading preserved.
   {
     name: 'copperBars',
     bundle: 'dist/effects/copper-bars.js',
-    descriptor: { config: { shading: { barAlphaScale: 0.5 } } },
-    migrated: ['bars/shading groups preserved']
+    // v2 shading.{highlightStrength,highlightWidth} → shading.{barAlphaScale,specular*}.
+    rejected: [{ config: { shading: { highlightStrength: 90 } } }, /Unknown option: copperBars\.shading\.highlightStrength/],
+    mount: { config: { shading: { barAlphaScale: 0.5, specularGain: 100 } } },
+    assert: (cfg) => { assert.equal(cfg.shading.barAlphaScale, 0.5); assert.equal(cfg.shading.specularGain, 100); }
   }
 ];
 
-for (const { name, bundle, descriptor, migrated } of MIGRATIONS) {
-  test(`docs: v2→v3 migration for ${name} mounts (${migrated.join('; ')})`, async () => {
+for (const { name, bundle, rejected, mount, assert: assertResolved } of MIGRATIONS) {
+  test(`docs: v2→v3 migration — ${name} v2 leaves rejected, v3 replacements resolve`, async () => {
     const env = createEnvironment();
     await loadBundle(bundle, env);
-    // Merge runtime.autoStart:false into the effect-specific config so the mount
-    // is a pure resolution check (no rAF loop).
-    const config = { runtime: { autoStart: false }, ...(descriptor.config || {}) };
-    const controller = env.sandbox.Demoscene[name](
-      env.createCanvas('#demo', 48, 32),
-      { config }
-    );
-    assert.equal(typeof controller.getConfig, 'function');
-    assert.equal(typeof controller.destroy, 'function');
+    const canvas = env.createCanvas('#demo', 48, 32);
+
+    // (a) Every renamed/removed/moved v2 leaf is rejected (not silently ignored).
+    const rejectedCases = Array.isArray(rejected) && Array.isArray(rejected[0])
+      ? rejected
+      : (rejected ? [rejected] : []);
+    for (const [rejectedDescriptor, pattern] of rejectedCases) {
+      assert.throws(
+        () => env.sandbox.Demoscene[name](canvas, rejectedDescriptor),
+        pattern,
+        `${name}: v2 leaf should be rejected`
+      );
+    }
+
+    // (b) The documented v3 replacement mounts and the value lands at the
+    // exact resolved path returned by getConfig().
+    const controller = env.sandbox.Demoscene[name](canvas,
+      { config: { runtime: { autoStart: false }, ...(mount.config || {}) } });
+    assertResolved(controller.getConfig());
     controller.destroy();
   });
 }

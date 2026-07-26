@@ -396,11 +396,11 @@ Demoscene.fire(canvas, { simulation: { seed: 7 } });
    | `rotozoom` | `texture.size`/`checkerSize`/`ringFrequency`/`spokeCount`/`centerRadius`/`borderRadius` → single normalized `texture.tiles` (capped). `motion.zoomBase`/`zoomAmplitude`/`zoomSpeed` → normalized zoom motion. |
    | `feedback` | `feedback.alphaDecay`/`scale`/`rotation`/`fade` → **per-second** `feedback.decayPerSecond`/`scalePerSecond`/`rotationPerSecond`. `geometry.*` radii/widths → fractions of the short side. |
    | `plasma` | `field.frequencies` units change from buffer-pixels to **cycles per viewport-height** (4-element array preserved). `field.amplitudes`/`phaseRates` preserved. |
-   | `tunnel` | `geometry` frequencies and `motion.forwardSpeed`/`rotationSpeed`/`colorCycleSpeed` are **normalized** (units changed); `geometry.fog*` reworked into `fogNear`/`fogStrength`/`fogColor`. |
-   | `metaballs` | `field.lowScale`/`highScale` **removed** (mapping is now palette-driven). `field.pointCount`/`points`/`radius`/`strength`/`threshold` preserved (radius normalized). |
+   | `tunnel` | `geometry.radialFrequency` → `geometry.wallFrequency`; `geometry.fogDistance`/`fogMinimum` → `fogNear`/`fogFar`/`fogStrength`/`fogColor`. `motion.forwardSpeed`/`rotationSpeed`/`colorCycleSpeed` units normalized. |
+   | `metaballs` | `field.fieldStrength` → `field.strength`; `field.radius` is **new** (normalized blob radius, no v2 equivalent — v2 sized blobs via `lowScale`/`highScale`, now **removed** because mapping is palette-driven). `field.pointCount`/`points`/`threshold`/`mergeBand` preserved. |
    | `mandelbrot` | `camera`/`algorithm` **preserved**. Added continuous-coloring knobs `appearance.colorScale`/`colorCurve`/`colorOffset`/`cycleSpeed`. |
-   | `sineScroller` | `wave.frequency` → `wave.cycles` (cycles across the text path). `text`/`stars` preserved. |
-   | `copperBars` | `bars`/`shading` **preserved**. |
+   | `sineScroller` | `wave.frequency` → `wave.cycles`; `text.maxFontSize` → `text.fontSizeMax` (+ new `fontSizeMin`); `text.fontFamily`/`fontWeight` → **`appearance.*`** (skin-owned); `text.shadowOffsetX/Y` → normalized fractions; `stars.*` sizes/speed units normalized; new `stars.density*` budget. |
+   | `copperBars` | `shading.highlightStrength`/`highlightWidth` → `shading.barAlphaScale` + `shading.specularWidth`/`specularFalloff`/`specularGain`; `bars` array preserved. |
 
 2. **Move visual choices to a skin.** Palette, background, glow, and other
    presentation-only values belong in `skin.overrides.appearance`, not in the
