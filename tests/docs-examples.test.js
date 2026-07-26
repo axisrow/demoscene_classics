@@ -337,22 +337,31 @@ const MIGRATIONS = [
   {
     name: 'tunnel',
     bundle: 'dist/effects/tunnel.js',
-    // v2 geometry.radialFrequency → geometry.wallFrequency; fog fields reworked.
+    // v2 geometry.radialFrequency → geometry.wallFrequency; fog colour moved
+    // from the v2 geometry group to appearance in v3.
     rejected: [{ config: { geometry: { radialFrequency: 60 } } }, /Unknown option: tunnel\.geometry\.radialFrequency/],
-    mount: { config: { geometry: { wallFrequency: 4 } } },
-    assert: (cfg) => { assert.equal(cfg.geometry.wallFrequency, 4); }
+    mount: { config: { geometry: { wallFrequency: 4 }, appearance: { fogColor: '#0a0a14' } } },
+    assert: (cfg) => {
+      assert.equal(cfg.geometry.wallFrequency, 4);
+      assert.equal(cfg.appearance.fogColor, '#0a0a14');
+    }
   },
   {
     name: 'metaballs',
     bundle: 'dist/effects/metaballs.js',
-    // v2 field.fieldStrength → field.strength; v2 had no field.radius; lowScale/
-    // highScale removed (mapping is now palette-driven).
+    // v2 field.fieldStrength → field.strength; v2 had no field.radius/mergeBand;
+    // lowScale/highScale removed (mapping is now palette-driven). points units
+    // changed but the key name is preserved, so it is not in `rejected`.
     rejected: [
       [{ config: { field: { fieldStrength: 1 } } }, /Unknown option: metaballs\.field\.fieldStrength/],
       [{ config: { field: { lowScale: 60 } } }, /Unknown option: metaballs\.field\.lowScale/]
     ],
-    mount: { config: { field: { radius: 0.2, strength: 1.2 } } },
-    assert: (cfg) => { assert.equal(cfg.field.radius, 0.2); assert.equal(cfg.field.strength, 1.2); }
+    mount: { config: { field: { radius: 0.2, strength: 1.2, mergeBand: 0.5 } } },
+    assert: (cfg) => {
+      assert.equal(cfg.field.radius, 0.2);
+      assert.equal(cfg.field.strength, 1.2);
+      assert.equal(cfg.field.mergeBand, 0.5);
+    }
   },
   {
     name: 'mandelbrot',
