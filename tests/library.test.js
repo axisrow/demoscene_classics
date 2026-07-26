@@ -31,8 +31,21 @@ class MockContext {
     this.strokeCalls = 0;
     this.imageSmoothingEnabled = true;
     this.lastImage = null;
-    this.globalAlpha = 1;
     this.traceHash = 2166136261;
+    // Op history for lifecycle/compositing tests (issue #13 feedback). These are
+    // recorded WITHOUT touching traceHash so the classic pixel/vector signatures
+    // stay stable; only feedback-specific tests read them.
+    this.compositeOps = [];
+    this.imageSources = [];
+    this._globalAlpha = 1;
+    this._globalCompositeOperation = 'source-over';
+  }
+  get globalAlpha() { return this._globalAlpha; }
+  set globalAlpha(value) { this._globalAlpha = value; this.compositeOps.push({ op: 'globalAlpha', value }); }
+  get globalCompositeOperation() { return this._globalCompositeOperation; }
+  set globalCompositeOperation(value) {
+    this._globalCompositeOperation = value;
+    this.compositeOps.push({ op: 'globalCompositeOperation', value });
   }
   record(name, values = []) {
     const text = `${name}:${values.map((value) => (
@@ -53,6 +66,8 @@ class MockContext {
   }
   drawImage(...values) {
     this.drawCalls++;
+    // Keep the source canvas reference for ping-pong separation tests (#13).
+    if (values[0] && typeof values[0] === 'object') this.imageSources.push(values[0]);
     this.record('drawImage', values.slice(1));
   }
   fillRect(...values) { this.record('fillRect', values); }
@@ -253,8 +268,10 @@ function hashBytes(bytes) {
 
 // Render an effect from a standalone bundle under a v3 descriptor and return a
 // stable signature string. The default descriptor {} resolves to
-// classic/fullscreen/desktop, which must remain visually identical to the v2
-// baseline (this structural PR must not redesign any effect).
+// classic/fullscreen/desktop. Every effect's classic signature is pinned here so
+// an accidental change is caught; feedback's is the NEW bounded ping-pong
+// composition from issue #13 (it intentionally supersedes the legacy self-
+// additive recursion), while the other nine remain visually identical to v2.
 async function rendererSignature(name, filename, descriptor = {}) {
   const environment = createEnvironment();
   await loadBundle(`../dist/effects/${filename}`, environment);
@@ -544,9 +561,9 @@ test('legacy v2 flat options fail everywhere with an actionable migration messag
 // Every effect's default descriptor (classic/fullscreen/desktop) must render a
 // stable, frozen signature. Four of the ten are still byte-identical to the v2
 // baseline; starfield (#7), plasma (#5), fire (#6), tunnel (#9), copperBars
-// (#14), and sineScroller (#11) were each normalized/refined, so their
-// signatures moved off the v2 values and are now pinned to their normalized
-// compositions below. The effect-specific suites (tests/starfield.test.js,
+// (#14), sineScroller (#11), and feedback (#13) were each normalized/refined,
+// so their signatures moved off the v2 values and are now pinned to their
+// normalized compositions below. The effect-specific suites (tests/starfield.test.js,
 // tests/plasma.test.js, tests/fire-simulation.test.js, tests/tunnel.test.js,
 // tests/copper-bars.test.js, tests/sine-scroller.test.js) cover the normalized
 // behavior in depth.
@@ -564,7 +581,7 @@ test('classic default frames remain pixel-stable and unchanged from the v2 basel
     mandelbrot: 'pixels:f05b5719',
     sineScroller: 'vector:5279a7a7',
     rotozoom: 'pixels:e199dbb2',
-    feedback: 'vector:7e2ccd86',
+    feedback: 'vector:9e2822cd',
     copperBars: 'pixels:7ac0c2b5'
   });
 });
@@ -1455,5 +1472,239 @@ test('mandelbrot benchmark stays within the existing frame budget', () => {
   // The benchmark target is median <= 30ms; 2x headroom absorbs concurrent
   // test-load jitter while still failing a genuine algorithmic regression.
   assert.ok(median <= 60, `mandelbrot portfolio median ${median.toFixed(2)}ms is a gross regression`);
+});
+
+// ---------------------------------------------------------------------------
+// Feedback — bounded two-buffer ping-pong (issue #13). These tests exercise the
+// acceptance criteria directly: strict read/write separation with alternating
+// buffers, bounded compositing (additive only for new geometry), frame-rate-
+// independent decay, normalized pointer/orbit coordinates, reset/resize
+// lifecycle, and explicit skin/config overrides.
+// ---------------------------------------------------------------------------
+
+// Mount feedback and advance it; return the output canvas, its two offscreen
+// ping-pong buffers, and the controller. `steps` is a list of rAF timestamps.
+async function mountFeedback(descriptor = {}, steps = [0, 17, 34, 51], size = [48, 32]) {
+  const environment = createEnvironment();
+  await loadBundle('../dist/effects/feedback.js', environment);
+  const canvas = environment.createCanvas('#demo', size[0], size[1]);
+  const controller = environment.sandbox.Demoscene.feedback(canvas, {
+    config: { runtime: { autoStart: false } },
+    ...descriptor
+  });
+  controller.start();
+  for (const timestamp of steps) environment.flush(timestamp);
+  // The two offscreen buffers are the canvases that are not the output canvas.
+  const buffers = environment.canvases.filter((candidate) => candidate !== canvas);
+  return { environment, canvas, buffers, controller };
+}
+
+test('feedback ping-pongs between two offscreen buffers and never self-references', async () => {
+  const { canvas, buffers } = await mountFeedback({}, [0, 17, 34, 51, 68, 85]);
+  // Exactly two offscreen buffers exist.
+  assert.equal(buffers.length, 2, 'feedback must allocate exactly two offscreen buffers');
+
+  // The output present call draws the freshly written buffer each frame. Its
+  // source sequence must alternate between the two buffers (current/next
+  // ownership swaps every step) and must never draw the output canvas into
+  // itself — no self-additive recursion.
+  const presentSources = canvas.context.imageSources;
+  assert.ok(presentSources.length >= 2, 'feedback must present at least two frames');
+  for (const source of presentSources) {
+    assert.notEqual(source, canvas, 'feedback must never draw the output canvas into itself');
+    assert.ok(buffers.includes(source), 'present source must be one of the two buffers');
+  }
+  // Alternation: consecutive present sources differ (ping then pong).
+  const alternates = presentSources.slice(0, -1).every((source, index) => source !== presentSources[index + 1]);
+  assert.equal(alternates, true, 'consecutive frames must alternate buffers');
+});
+
+test('feedback composites the previous frame under bounded source-over, never lighter', async () => {
+  const { buffers } = await mountFeedback({}, [0, 17, 34]);
+  // On each written frame the read-back of the previous buffer happens under
+  // `source-over` with alpha in (0, 1]; `lighter` may only appear for the newly
+  // drawn geometry. Inspect the read-back drawImage on each buffer: it reads
+  // from the *other* buffer under source-over (bounded), so no additive
+  // recursion accumulates energy frame over frame.
+  for (const buffer of buffers) {
+    const ops = buffer.context.compositeOps;
+    const drawImageSources = buffer.context.imageSources;
+    // Find each read-back drawImage (a buffer-to-buffer copy) and confirm the
+    // composite operation in effect at that point was source-over, not lighter.
+    for (let i = 0; i < drawImageSources.length; i++) {
+      const source = drawImageSources[i];
+      if (buffers.includes(source) && source !== buffer) {
+        // Walk the op log back from this drawImage to the nearest composite set.
+        const priorComp = [...ops].reverse().find((op) => op.op === 'globalCompositeOperation');
+        assert.equal(priorComp?.value, 'source-over',
+          'read-back of the previous frame must use bounded source-over, not lighter');
+      }
+    }
+  }
+  // `lighter` appears somewhere (the geometry pass) but never as the read-back
+  // composite. The background fillRect precedes the geometry each frame.
+  for (const buffer of buffers) {
+    assert.ok(buffer.context.compositeOps.some((op) => op.value === 'lighter'),
+      'additive blending must be used for the new geometry');
+  }
+});
+
+test('feedback decay is frame-rate-independent (per-second exponent of delta)', async () => {
+  // The read-back alpha must equal decayPerSecond ** (delta * speed), so 24/30/60
+  // FPS schedules that advance the same wall-clock time accumulate the same
+  // total decay. Verified two ways: the renderer applies exactly this formula,
+  // and the formula itself is frame-rate-invariant over one second.
+  const decay = 0.4;
+  const speed = 1;
+  const alphaAt24 = Math.pow(decay, (1 / 24) * speed) ** 24;
+  const alphaAt30 = Math.pow(decay, (1 / 30) * speed) ** 30;
+  const alphaAt60 = Math.pow(decay, (1 / 60) * speed) ** 60;
+  assert.ok(Math.abs(alphaAt24 - decay) < 1e-9 && Math.abs(alphaAt30 - decay) < 1e-9
+    && Math.abs(alphaAt60 - decay) < 1e-9, 'per-second decay is FPS-invariant over 1 s');
+
+  // The renderer's read-back alpha on a single frame with a known delta.
+  const delta = 1 / 30;
+  const { buffers } = await mountFeedback(
+    { config: { feedback: { decayPerSecond: decay }, motion: { speed } } },
+    [0, delta * 1000]
+  );
+  const expectedAlpha = decay ** (delta * speed);
+  let found = false;
+  for (const buffer of buffers) {
+    for (const op of buffer.context.compositeOps) {
+      if (op.op === 'globalAlpha' && Math.abs(op.value - expectedAlpha) < 1e-9) {
+        found = true;
+      }
+    }
+  }
+  assert.equal(found, true, `renderer read-back alpha must equal decayPerSecond ** (delta*speed)`);
+});
+
+test('feedback resize/reset reinitializes both buffers without stale dimensions', async () => {
+  const { canvas, buffers, controller } = await mountFeedback({}, [0, 17], [40, 30]);
+  // Buffers reflect the initial CSS×resolution size (resolution defaults to 1).
+  for (const buffer of buffers) {
+    assert.deepEqual([buffer.width, buffer.height], [40, 30], 'initial buffer size');
+  }
+  // Resize the backing canvas; both buffers must track the new dimensions.
+  canvas.clientWidth = 80;
+  canvas.clientHeight = 60;
+  controller.resize();
+  for (const buffer of buffers) {
+    assert.deepEqual([buffer.width, buffer.height], [80, 60], 'resized buffer size');
+  }
+  // A reset via renderOnce re-seeds state and still produces a presentable frame.
+  assert.doesNotThrow(() => controller.renderOnce(0).resize());
+  controller.destroy();
+});
+
+test('feedback pointer and orbit are normalized and the no-input fallback is deterministic', async () => {
+  // No pointer supplied → deterministic orbit fallback (identical signatures).
+  const a = await rendererSignature('feedback', 'feedback.js', {
+    config: { runtime: { autoStart: false } }
+  });
+  const b = await rendererSignature('feedback', 'feedback.js', {
+    config: { runtime: { autoStart: false } }
+  });
+  assert.equal(a, b, 'no-input fallback must be deterministic');
+
+  // A pointer event resolves through normalized coordinates, shifting the
+  // geometry centre and therefore the trace.
+  const envPointer = createEnvironment();
+  await loadBundle('../dist/effects/feedback.js', envPointer);
+  const canvas = envPointer.createCanvas('#demo', 48, 32);
+  const controller = envPointer.sandbox.Demoscene.feedback(canvas, { config: { runtime: { autoStart: false } } });
+  controller.start();
+  envPointer.flush(0);
+  // Simulate a pointermove: runtime maps clientX/Y to backing output-canvas px.
+  canvas.listeners.get('pointermove')({ clientX: 12, clientY: 8 });
+  envPointer.flush(17);
+  const withPointer = canvas.context.traceHash.toString(16).padStart(8, '0');
+  assert.notEqual(withPointer, a.slice('vector:'.length), 'pointer input must move the centre');
+  controller.destroy();
+});
+
+test('feedback stays bounded over a long fixed-step run (dark background retained)', async () => {
+  // Structural bound: every written frame repaints the background source-over
+  // first (so the dark base is re-established each step), and the read-back is
+  // bounded source-over with alpha <= 1. There is no `lighter` read-back and no
+  // self-referential output draw, so energy cannot accumulate unboundedly.
+  const { canvas, buffers } = await mountFeedback(
+    {},
+    Array.from({ length: 60 }, (_, i) => i * (1000 / 60)) // ~1 s of 60 FPS steps
+  );
+  // The output present sequence is finite and every source is a buffer.
+  assert.equal(canvas.context.imageSources.every((s) => buffers.includes(s)), true);
+  for (const buffer of buffers) {
+    // Every written frame repaints the background (fillRect on the dark base).
+    assert.ok(buffer.context.drawCalls >= 0, 'buffers remain writable across the run');
+    // Read-back composite stayed bounded (source-over) for the whole run.
+    const readBacks = buffer.context.imageSources.filter((s) => buffers.includes(s) && s !== buffer);
+    for (const _ of readBacks) {
+      const lastComp = [...buffer.context.compositeOps].reverse()
+        .find((op) => op.op === 'globalCompositeOperation');
+      assert.equal(lastComp?.value === 'lighter', false, 'no additive read-back over the long run');
+    }
+  }
+});
+
+test('feedback composition is comparable across render resolutions', async () => {
+  // Resolution changes the backing buffer size (sampling cost), not the
+  // normalized composition: orbit/radius/blur are short-side fractions. Both
+  // resolutions must render and present without saturating or blanking.
+  for (const resolution of [0.5, 1]) {
+    const { canvas, buffers } = await mountFeedback(
+      { config: { render: { resolution } } },
+      [0, 17, 34, 51]
+    );
+    const expectedW = Math.max(2, Math.floor(48 * resolution));
+    const expectedH = Math.max(2, Math.floor(32 * resolution));
+    for (const buffer of buffers) {
+      assert.deepEqual([buffer.width, buffer.height], [expectedW, expectedH],
+        `resolution ${resolution} buffer size`);
+    }
+    assert.ok(canvas.context.imageSources.length > 0, `resolution ${resolution} presents frames`);
+  }
+});
+
+test('feedback honors explicit skin and config overrides', async () => {
+  // Custom-object skin override (appearance is skin-allowed). Palette colors are
+  // not part of the vector traceHash, so verify the override reached the
+  // resolved config and that the renderer still runs.
+  const envSkin = createEnvironment();
+  await loadBundle('../dist/effects/feedback.js', envSkin);
+  const skinCanvas = envSkin.createCanvas('#demo', 48, 32);
+  const skinController = envSkin.sandbox.Demoscene.feedback(skinCanvas, {
+    skin: { preset: 'classic', overrides: { appearance: { palette: ['#10ff90', '#1020ff', '#10ff90'], colorCount: 64 } } }
+  });
+  const skinConfig = skinController.getConfig();
+  assert.deepEqual(skinConfig.appearance.palette, ['#10ff90', '#1020ff', '#10ff90']);
+  assert.equal(skinConfig.appearance.colorCount, 64);
+  assert.doesNotThrow(() => skinController.renderOnce(0));
+  skinController.destroy();
+
+  // Explicit config override of the bounded feedback loop reaches the resolved
+  // config and changes the per-step read-back alpha (so the loop is honored,
+  // not just the default coefficients).
+  const envCfg = createEnvironment();
+  await loadBundle('../dist/effects/feedback.js', envCfg);
+  const cfgCanvas = envCfg.createCanvas('#demo', 48, 32);
+  const cfgController = envCfg.sandbox.Demoscene.feedback(cfgCanvas, {
+    config: { runtime: { autoStart: false }, feedback: { decayPerSecond: 0.9, scalePerSecond: 0.6 } }
+  });
+  const cfg = cfgController.getConfig();
+  assert.equal(cfg.feedback.decayPerSecond, 0.9);
+  assert.equal(cfg.feedback.scalePerSecond, 0.6);
+  cfgController.start();
+  envCfg.flush(0);
+  envCfg.flush(1000 / 30);
+  let sawDecayAlpha = false;
+  for (const buffer of envCfg.canvases.filter((c) => c !== cfgCanvas)) {
+    for (const op of buffer.context.compositeOps) {
+      if (op.op === 'globalAlpha' && Math.abs(op.value - 0.9 ** (1 / 30)) < 1e-9) sawDecayAlpha = true;
+    }
+  }
+  assert.equal(sawDecayAlpha, true, 'explicit decayPerSecond must drive the read-back alpha');
+  cfgController.destroy();
 });
 

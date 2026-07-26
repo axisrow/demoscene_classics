@@ -605,61 +605,82 @@
   // src/effects/feedback/renderer.js
   function createFeedbackRenderer({ canvas, config }) {
     const output = getContext2D(canvas);
-    const buffer = createDrawingBuffer();
-    const context = buffer.context;
+    const buffers = [createDrawingBuffer(), createDrawingBuffer()];
+    let readIndex = 0;
+    let writeIndex = 1;
     const palette = buildGradientPalette(
       new Uint32Array(config.appearance.colorCount),
       config.appearance.palette
     );
     let width = 1;
     let height = 1;
+    let shortSide = 1;
     let pointerX = null;
     let pointerY = null;
     let hasRendered = false;
+    function reallocateBuffers(nextWidth, nextHeight) {
+      width = nextWidth;
+      height = nextHeight;
+      shortSide = Math.min(width, height);
+      for (const buffer of buffers) {
+        resizeDrawingBuffer(buffer, width, height);
+      }
+      readIndex = 0;
+      writeIndex = 1;
+      hasRendered = false;
+    }
+    function resetContextState(context) {
+      context.globalAlpha = 1;
+      context.globalCompositeOperation = "source-over";
+      context.shadowBlur = 0;
+      context.shadowColor = "transparent";
+      context.shadowOffsetX = 0;
+      context.shadowOffsetY = 0;
+    }
+    function paintBackground(context) {
+      resetContextState(context);
+      context.fillStyle = config.appearance.backgroundColor;
+      context.fillRect(0, 0, width, height);
+    }
     return {
       resize(nextWidth, nextHeight) {
-        width = nextWidth * config.render.resolution;
-        height = nextHeight * config.render.resolution;
-        resizeDrawingBuffer(buffer, width, height);
-        hasRendered = false;
+        reallocateBuffers(nextWidth * config.render.resolution, nextHeight * config.render.resolution);
       },
       pointer(x, y) {
-        pointerX = x === null ? null : x * config.render.resolution;
-        pointerY = y === null ? null : y * config.render.resolution;
+        if (x === null || y === null) {
+          pointerX = null;
+          pointerY = null;
+          return;
+        }
+        pointerX = width > 0 ? Math.min(1, Math.max(0, x / canvas.width)) : null;
+        pointerY = height > 0 ? Math.min(1, Math.max(0, y / canvas.height)) : null;
       },
       render({ time, delta }) {
         if (hasRendered && delta === 0) return;
-        const frameFactor = delta * 60 * config.motion.speed;
-        if (hasRendered) {
-          context.globalCompositeOperation = "lighter";
-          context.globalAlpha = config.feedback.alphaDecay ** frameFactor;
-          context.save();
-          context.translate(width / 2, height / 2);
-          context.rotate(config.feedback.rotation * frameFactor);
-          context.scale(config.feedback.scale ** frameFactor, config.feedback.scale ** frameFactor);
-          context.translate(-width / 2, -height / 2);
-          context.drawImage(buffer.canvas, 0, 0);
-          context.restore();
-          context.globalCompositeOperation = "source-over";
-          context.globalAlpha = 1;
-          context.fillStyle = config.appearance.backgroundColor;
-          context.globalAlpha = 1 - config.feedback.fade ** frameFactor;
-          context.fillRect(0, 0, width, height);
-          context.globalAlpha = 1;
+        const read = buffers[readIndex];
+        const write = buffers[writeIndex];
+        const context = write.context;
+        if (!hasRendered) {
+          paintBackground(context);
         } else {
-          context.fillStyle = config.appearance.backgroundColor;
-          context.fillRect(0, 0, width, height);
+          const frameFactor = delta * config.motion.speed;
+          paintBackground(context);
+          resetContextState(context);
+          context.globalAlpha = config.feedback.decayPerSecond ** frameFactor;
+          context.globalCompositeOperation = "source-over";
+          context.drawImage(read.canvas, 0, 0);
+          resetContextState(context);
         }
         const scaledTime = time * config.motion.speed;
-        const centerX = pointerX ?? width / 2 + Math.cos(scaledTime * config.motion.orbitSpeedX) * width * config.geometry.orbitX;
-        const centerY = pointerY ?? height / 2 + Math.sin(scaledTime * config.motion.orbitSpeedY) * height * config.geometry.orbitY;
-        const radius = config.geometry.radius + Math.sin(scaledTime * config.geometry.radiusOscillationSpeed) * config.geometry.radiusOscillation;
+        const centerX = (pointerX ?? 0.5 + Math.cos(scaledTime * config.motion.orbitSpeedX) * config.geometry.orbitX * 0.5) * width;
+        const centerY = (pointerY ?? 0.5 + Math.sin(scaledTime * config.motion.orbitSpeedY) * config.geometry.orbitY * 0.5) * height;
+        const radius = (config.geometry.radius + Math.sin(scaledTime * config.geometry.radiusOscillationSpeed) * config.geometry.radiusOscillation) * config.feedback.scalePerSecond ** (time * config.motion.speed) * shortSide;
         context.globalCompositeOperation = "lighter";
         for (let pass = 0; pass < config.geometry.passes; pass++) {
           context.beginPath();
-          const passRadius = radius + pass * config.geometry.passSpacing;
+          const passRadius = radius + pass * config.geometry.passSpacing * shortSide;
           for (let point = 0; point <= config.geometry.sides; point++) {
-            const angle = point / config.geometry.sides * Math.PI * 2 + scaledTime * (config.motion.polygonRotationSpeed + pass * config.motion.passRotationStep);
+            const angle = point / config.geometry.sides * Math.PI * 2 + scaledTime * (config.motion.polygonRotationSpeed + config.feedback.rotationPerSecond + pass * config.motion.passRotationStep);
             const x = centerX + Math.cos(angle) * passRadius;
             const y = centerY + Math.sin(angle) * passRadius;
             if (point === 0) context.moveTo(x, y);
@@ -672,17 +693,21 @@
           const red = color & 255;
           const green = color >>> 8 & 255;
           const blue = color >>> 16 & 255;
-          context.lineWidth = config.geometry.strokeWidth;
+          context.lineWidth = config.geometry.strokeWidth * shortSide;
           context.strokeStyle = `rgba(${red},${green},${blue},${config.appearance.strokeAlpha})`;
           context.shadowColor = context.strokeStyle;
-          context.shadowBlur = config.geometry.shadowBlur;
+          context.shadowBlur = config.geometry.shadowBlur * shortSide;
           context.stroke();
         }
-        context.shadowBlur = 0;
-        context.globalAlpha = 1;
-        context.globalCompositeOperation = "source-over";
+        resetContextState(context);
         hasRendered = true;
-        presentDrawingBuffer(output, buffer, canvas.width, canvas.height, config.render.smoothing);
+        const justWritten = write;
+        readIndex = writeIndex;
+        writeIndex = (writeIndex + 1) % buffers.length;
+        presentDrawingBuffer(output, justWritten, canvas.width, canvas.height, config.render.smoothing);
+      },
+      destroy() {
+        resetContextState(output);
       }
     };
   }
@@ -707,20 +732,37 @@
     geometry: {
       sides: 5,
       passes: 3,
-      radius: 40,
-      radiusOscillation: 14,
+      // Radius of the polygon ring, as a fraction of the buffer short side.
+      radius: 0.085,
+      radiusOscillation: 0.03,
       radiusOscillationSpeed: 3,
-      passSpacing: 8,
-      strokeWidth: 2,
-      shadowBlur: 18,
+      passSpacing: 0.02,
+      // Stroke and glow widths, as fractions of the buffer short side.
+      strokeWidth: 4e-3,
+      shadowBlur: 0.04,
+      // Orbit displacement of the input centre, as fractions of short side.
       orbitX: 0.18,
       orbitY: 0.18
     },
     feedback: {
-      alphaDecay: 0.93,
-      scale: 0.985,
-      rotation: 0.012,
-      fade: 0.96
+      // Fraction of the previous frame's luminance retained after one second of
+      // decay. Exponentiated by `delta` per step on the IDENTITY read-back, so
+      // persistence is comparable across FPS schedules. Below 1 this strictly
+      // bounds accumulation: a pixel can never grow brighter than its source
+      // contributions allow.
+      decayPerSecond: 0.45,
+      // Per-second zoom of the polygon ring, applied as a pure function of `time`
+      // to the geometry (NOT to the read-back, which stays identity to avoid
+      // amplifying cross-OS AA drift). Bounded in (0, 1] so the ring eases inward
+      // without runaway accumulation.
+      scalePerSecond: 0.9,
+      // Per-second rotation of the polygon pattern, in radians, applied as a pure
+      // function of `time` to the geometry (NOT to the read-back).
+      rotationPerSecond: 0.7,
+      // How much of the dim background tint survives into the next frame, in
+      // [0, 1]. Bounds the darkest the trail can settle to without forcing an
+      // exact pixel value.
+      backgroundRetention: 0
     }
   });
   function validateFeedback(config) {
@@ -730,16 +772,17 @@
     assertNumber(config.appearance.strokeAlpha, "feedback.appearance.strokeAlpha", { min: 0, max: 1 });
     assertNumber(config.geometry.sides, "feedback.geometry.sides", { min: 3, max: 64, integer: true });
     assertNumber(config.geometry.passes, "feedback.geometry.passes", { min: 1, max: 32, integer: true });
-    for (const key of ["radius", "radiusOscillation", "radiusOscillationSpeed", "passSpacing", "strokeWidth", "shadowBlur"]) {
-      assertNumber(config.geometry[key], `feedback.geometry.${key}`, { min: 0 });
+    for (const key of ["radius", "radiusOscillation", "passSpacing", "strokeWidth", "shadowBlur"]) {
+      assertNumber(config.geometry[key], `feedback.geometry.${key}`, { min: 0, max: 1 });
     }
+    assertNumber(config.geometry.radiusOscillationSpeed, "feedback.geometry.radiusOscillationSpeed", { min: 0 });
     for (const key of ["orbitX", "orbitY"]) {
       assertNumber(config.geometry[key], `feedback.geometry.${key}`, { min: 0, max: 1 });
     }
-    for (const key of ["alphaDecay", "scale", "fade"]) {
-      assertNumber(config.feedback[key], `feedback.feedback.${key}`, { min: 0, max: 1 });
-    }
-    assertNumber(config.feedback.rotation, "feedback.feedback.rotation");
+    assertNumber(config.feedback.decayPerSecond, "feedback.feedback.decayPerSecond", { min: Number.MIN_VALUE, max: 1 });
+    assertNumber(config.feedback.scalePerSecond, "feedback.feedback.scalePerSecond", { min: Number.MIN_VALUE, max: 1 });
+    assertNumber(config.feedback.rotationPerSecond, "feedback.feedback.rotationPerSecond");
+    assertNumber(config.feedback.backgroundRetention, "feedback.feedback.backgroundRetention", { min: 0, max: 1 });
   }
 
   // src/effects/feedback/skins.js
