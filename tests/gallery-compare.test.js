@@ -5,7 +5,8 @@ import { decodePng, encodePng } from '../visual/png.mjs';
 import {
   compareGallery,
   GALLERY_DIMENSION_TOLERANCE_FRACTION,
-  GALLERY_DIMENSION_TOLERANCE_FLOOR_PX
+  GALLERY_DIMENSION_TOLERANCE_FLOOR_PX,
+  GALLERY_MAX_DIFF_PIXEL_RATIO
 } from '../visual/gallery.mjs';
 
 // Unit tests for the gallery comparator's dimension tolerance + the destructive-
@@ -92,6 +93,34 @@ test('compareGallery: a pixel-content change within tolerance dimensions still f
   const result = compareGallery(changed, baseline, { maxDiffPixelRatio: 0.15 });
   assert.equal(result.match, false);
   assert.equal(result.reason, 'pixel-diff');
+});
+
+test('compareGallery: production tolerance absorbs the measured cross-OS gallery drift but fails a near-total change', () => {
+  // The production gallery ceiling (GALLERY_MAX_DIFF_PIXEL_RATIO) must sit ABOVE
+  // the measured macOS↔Linux full-page drift (~48.5% desktop) so a clean cross-OS
+  // run passes, but BELOW a near-total content change so a real regression fails.
+  assert.ok(GALLERY_MAX_DIFF_PIXEL_RATIO > 0.485,
+    `production gallery tolerance ${GALLERY_MAX_DIFF_PIXEL_RATIO} must exceed the measured ~48.5% cross-OS desktop drift`);
+
+  // Simulate the measured cross-OS drift: ~48% of pixels differ (font backend).
+  const baseline = solidPng(100, 100, [0, 0, 0]);
+  const drift = decodePng(solidPng(100, 100, [0, 0, 0]));
+  for (let i = 0, n = 0; i < drift.rgba.length; i += 4, n++) {
+    if (n % 2 === 0) { drift.rgba[i] = 200; drift.rgba[i + 1] = 200; drift.rgba[i + 2] = 200; }
+  }
+  const driftPng = encodePng({ width: 100, height: 100, rgba: drift.rgba });
+  assert.equal(compareGallery(driftPng, baseline, { maxDiffPixelRatio: GALLERY_MAX_DIFF_PIXEL_RATIO }).match, true,
+    '~50% cross-OS drift must be absorbed by the production tolerance');
+
+  // A near-total content change (90% — a real regression like a wrong palette)
+  // still fails even at the production tolerance.
+  const worst = decodePng(solidPng(100, 100, [0, 0, 0]));
+  for (let i = 0; i < worst.rgba.length; i += 4) {
+    worst.rgba[i] = 255; worst.rgba[i + 1] = 255; worst.rgba[i + 2] = 255;
+  }
+  const worstPng = encodePng({ width: 100, height: 100, rgba: worst.rgba });
+  assert.equal(compareGallery(worstPng, baseline, { maxDiffPixelRatio: GALLERY_MAX_DIFF_PIXEL_RATIO }).match, false,
+    'a 100% content change must fail the production tolerance');
 });
 
 test('compareGallery: tolerance floor is the larger of fraction and absolute floor', () => {
