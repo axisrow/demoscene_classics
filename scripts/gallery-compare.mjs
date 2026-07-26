@@ -8,58 +8,49 @@
 // a coarse-pointer screenshot, CRT overlay crushing contrast) fails here without
 // touching effect-only baselines.
 //
-// Tolerance: gallery screenshots are full-page decorated PNGs (CRT scanlines,
-// gradients, AA text, canvas imagery), so they are inherently vector/AA-heavy.
-// We reuse the documented vector ceiling (VECTOR_MAX_DIFF_PIXEL_RATIO, 0.15) from
-// visual/pin.mjs. A genuine presentation regression diffs well above 30%; the
-// 0.15 ceiling absorbs bounded rasterisation drift while still failing on real
-// changes. There is no foreground floor: the gallery page is mostly background by
-// design, so the runner's >=1000-byte blank guard is the semantic-blank check.
+// Output directories are HARDCODED (visual/captures/gallery,
+// visual/baselines/gallery, visual/diffs/gallery). There is no --diffs /
+// --captures / --baselines override: the only destructive step is `rm -rf
+// visual/diffs/gallery`, and a caller-supplied path there could delete the
+// checkout or a sibling worktree (e.g. `--diffs ..`). Hardcoding removes that
+// vector entirely; the npm scripts never override these paths anyway.
 //
-// Usage: node scripts/gallery-compare.mjs [--captures <dir>] [--baselines <dir>]
-//   Defaults: visual/captures/gallery vs visual/baselines/gallery.
+// Full-page gallery screenshots are not byte-stable across OSes (the host font
+// backend shifts line-wrap and thus page HEIGHT), so comparison uses the bounded
+// dimension-tolerant comparator in visual/gallery.mjs (small height delta clamps
+// to the common area + pixel ratio; width and large deltas still fail). Pixel
+// tolerance is the documented vector ceiling (VECTOR_MAX_DIFF_PIXEL_RATIO, 0.15).
 
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VECTOR_MAX_DIFF_PIXEL_RATIO } from '../visual/pin.mjs';
-import { comparePngBuffers, buildDiffImage, readPng } from '../visual/compare.mjs';
+import { buildDiffImage, readPng } from '../visual/compare.mjs';
 import { encodePng } from '../visual/png.mjs';
-import { GALLERY_FILENAMES } from '../visual/gallery.mjs';
+import {
+  GALLERY_FILENAMES,
+  GALLERY_DIMENSION_TOLERANCE_FRACTION,
+  GALLERY_DIMENSION_TOLERANCE_FLOOR_PX,
+  compareGallery
+} from '../visual/gallery.mjs';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const root = join(fileURLToPath(import.meta.url), '..', '..');
 
-const DEFAULTS = {
-  captures: 'visual/captures/gallery',
-  baselines: 'visual/baselines/gallery',
-  diffs: 'visual/diffs/gallery'
-};
-
-function parseArgs(argv) {
-  const args = { ...DEFAULTS };
-  for (let i = 2; i < argv.length; i++) {
-    if (argv[i] === '--captures') args.captures = argv[++i];
-    else if (argv[i] === '--baselines') args.baselines = argv[++i];
-    else if (argv[i] === '--diffs') args.diffs = argv[++i];
-  }
-  return args;
-}
+const CAPTURES_DIR = join(root, 'visual/captures/gallery');
+const BASELINES_DIR = join(root, 'visual/baselines/gallery');
+const DIFFS_DIR = join(root, 'visual/diffs/gallery');
 
 function listPngs(dir) {
   return readdir(dir).then((files) => files.filter((f) => f.endsWith('.png')).sort());
 }
 
 async function main() {
-  const args = parseArgs(process.argv);
-  const capturesDir = join(root, args.captures);
-  const baselinesDir = join(root, args.baselines);
-  const diffsDir = join(root, args.diffs);
-  await rm(diffsDir, { recursive: true, force: true });
-  await mkdir(diffsDir, { recursive: true });
+  await rm(DIFFS_DIR, { recursive: true, force: true });
+  await mkdir(DIFFS_DIR, { recursive: true });
 
   const expected = new Set(GALLERY_FILENAMES);
 
-  const [captureFiles, baselineFiles] = await Promise.all([listPngs(capturesDir), listPngs(baselinesDir)]);
+  const [captureFiles, baselineFiles] = await Promise.all([listPngs(CAPTURES_DIR), listPngs(BASELINES_DIR)]);
   const captureSet = new Set(captureFiles);
   const baselineSet = new Set(baselineFiles);
 
@@ -74,30 +65,31 @@ async function main() {
   for (const f of captureFiles) if (!expected.has(f)) errors.push(`unexpected stale capture: ${f}`);
   for (const f of baselineFiles) if (!expected.has(f)) errors.push(`unexpected stale baseline: ${f}`);
 
-  // 3. Pixel comparison for each expected baseline present on both sides.
+  // 3. Bounded-dimension + pixel comparison for each expected baseline on both sides.
   const comparison = [];
   for (const filename of [...expected].sort()) {
     if (!captureSet.has(filename) || !baselineSet.has(filename)) continue;
-    const actual = readPng(join(capturesDir, filename));
-    const expectedPng = readPng(join(baselinesDir, filename));
-    const result = comparePngBuffers(actual, expectedPng, {
-      maxDiffPixelRatio: VECTOR_MAX_DIFF_PIXEL_RATIO,
-      minForegroundRatio: 0
-    });
+    const actual = readPng(join(CAPTURES_DIR, filename));
+    const expectedPng = readPng(join(BASELINES_DIR, filename));
+    const result = compareGallery(actual, expectedPng, { maxDiffPixelRatio: VECTOR_MAX_DIFF_PIXEL_RATIO });
     comparison.push({ filename, ...result });
     if (!result.match) {
-      const diff = buildDiffImage(actual, expectedPng);
-      await writeFile(join(diffsDir, filename), encodeDiff(diff));
+      await writeFile(join(DIFFS_DIR, filename), encodePng(buildDiffImage(actual, expectedPng)));
     }
   }
 
   for (const c of comparison.filter((c) => !c.match)) {
-    if (c.dimensionMismatch) {
-      errors.push(`dimension mismatch in ${c.filename}: actual ${c.actual.width}x${c.actual.height} vs expected ${c.expected.width}x${c.expected.height}`);
+    if (c.reason === 'width-mismatch') {
+      errors.push(`width mismatch in ${c.filename}: actual ${c.actual.width}px vs expected ${c.expected.width}px (a viewport change is always a regression)`);
+    } else if (c.reason === 'height-delta') {
+      const tol = Math.max(GALLERY_DIMENSION_TOLERANCE_FRACTION * c.expected.height, GALLERY_DIMENSION_TOLERANCE_FLOOR_PX).toFixed(0);
+      errors.push(`height delta in ${c.filename}: actual ${c.actual.height}px vs expected ${c.expected.height}px (Δ${c.heightDelta}px > ${tol}px tolerance — real layout regression)`);
     } else {
       errors.push(
         `${c.filename}: diff ${c.diffPixels}/${c.totalPixels} pixels `
-        + `(${(c.diffPixelRatio * 100).toFixed(3)}% > ${(VECTOR_MAX_DIFF_PIXEL_RATIO * 100).toFixed(3)}% tolerance)`
+        + `(${(c.diffPixelRatio * 100).toFixed(3)}% > ${(VECTOR_MAX_DIFF_PIXEL_RATIO * 100).toFixed(3)}% tolerance`
+        + (c.comparedHeight && c.comparedHeight < c.actual.height ? `, compared common ${c.comparedHeight}px height` : '')
+        + ')'
       );
     }
   }
@@ -105,17 +97,11 @@ async function main() {
   if (errors.length) {
     console.error(`gallery-compare: ${errors.length} failure(s).`);
     for (const e of errors) console.error(`  ✖ ${e}`);
-    if (comparison.some((c) => !c.match)) console.error(`\nDiff images written to ${args.diffs}/. Review them, then run: npm run gallery:update`);
+    if (comparison.some((c) => !c.match)) console.error(`\nDiff images written to visual/diffs/gallery/. Review them, then run: npm run gallery:update`);
     process.exit(1);
   }
 
-  console.log(`gallery-compare: all ${comparison.length} captures match their baselines (within ${VECTOR_MAX_DIFF_PIXEL_RATIO * 100}% tolerance).`);
-}
-
-// compare.mjs's buildDiffImage returns a raw { width, height, rgba }; gallery-compare
-// needs a PNG. Reuse the project's dependency-free encoder.
-function encodeDiff(diff) {
-  return encodePng(diff);
+  console.log(`gallery-compare: all ${comparison.length} captures match their baselines (within ${VECTOR_MAX_DIFF_PIXEL_RATIO * 100}% tolerance, height-delta tolerant).`);
 }
 
 main().catch((error) => {

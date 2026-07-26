@@ -1,11 +1,13 @@
-// Shared gallery capture definition for the gallery screenshot harness (#15).
+// Shared gallery capture + comparison definition for the gallery screenshot
+// harness (#15).
 //
-// Declared in a side-effect-free module so both the capture orchestrator
-// (scripts/gallery-capture.mjs) and the comparator (scripts/gallery-compare.mjs)
-// can import the capture set and expected filename list without either script
-// executing the other's main() at import time. This mirrors the separation in
-// the effect harness (visual/matrix.mjs is imported by both visual-capture.mjs
-// and visual-compare.mjs and runs no top-level side effects).
+// Side-effect-free so both the capture orchestrator (scripts/gallery-capture.mjs),
+// the comparator (scripts/gallery-compare.mjs), and the unit tests can import from
+// here without any of them executing another's main(). This mirrors the effect
+// harness separation (visual/matrix.mjs / visual/compare.mjs are imported by both
+// visual-capture.mjs and visual-compare.mjs and run no top-level side effects).
+
+import { decodePng } from './png.mjs';
 
 // Fixed 5s @ 60Hz maturity so every preview reaches the same animation state as
 // the 5s effect baselines the gallery showcases.
@@ -40,3 +42,76 @@ export const GALLERY_CAPTURES = Object.freeze([
 // from the effect matrix) so the gallery comparator cannot be confused with the
 // effect comparator, and so completeness/staleness checks have one source of truth.
 export const GALLERY_FILENAMES = Object.freeze(GALLERY_CAPTURES.map((c) => c.filename));
+
+// Full-page gallery screenshots are NOT byte-stable across OSes the way pixel-buffer
+// effects are: the host font backend (macOS CoreText vs Linux FreeType) shifts
+// line-wrap and thus the total page HEIGHT by a few-to-tens of pixels. A strict
+// dimension gate would fail every cross-OS CI run with no regression. So the
+// gallery comparator allows a BOUNDED height delta and compares the common area.
+//
+// Allow up to DIMENSION_TOLERANCE_FRACTION of the baseline height, or
+// DIMENSION_TOLERANCE_FLOOR_PX absolute pixels — whichever is LARGER. A delta
+// beyond BOTH bounds is a real layout/aspect regression and fails. Width is never
+// tolerant (a viewport change is always a regression).
+export const GALLERY_DIMENSION_TOLERANCE_FRACTION = 0.05; // 5% of baseline height
+export const GALLERY_DIMENSION_TOLERANCE_FLOOR_PX = 40;   // ...or 40px, whichever is larger
+
+// Compare two full-page gallery PNGs with a bounded dimension tolerance + pixel
+// ratio. Returns { match, reason, actual, expected, diffPixelRatio, ... }.
+//
+// - Width mismatch → always fail (reason 'width-mismatch'): a viewport change is
+//   a regression, never absorbed.
+// - Height delta within the bounded tolerance (larger of fraction / floor) →
+//   clamp both images to the common height and compare the overlapping scanlines
+//   with the pixel ratio. Absorbs cross-OS font-backend height drift while still
+//   failing on real content regressions.
+// - Height delta beyond the tolerance → fail (reason 'height-delta'): a real
+//   layout/aspect regression (extra/missing card, broken wrap).
+//
+// `maxDiffPixelRatio` is the pixel-diff ceiling applied to the compared area
+// (the gallery comparator passes VECTOR_MAX_DIFF_PIXEL_RATIO, 0.15).
+export function compareGallery(actualBuf, expectedBuf, { maxDiffPixelRatio }) {
+  const actual = decodePng(actualBuf);
+  const expected = decodePng(expectedBuf);
+  if (actual.width !== expected.width) {
+    return { match: false, reason: 'width-mismatch', actual, expected, diffPixelRatio: 1 };
+  }
+  const minHeight = Math.min(actual.height, expected.height);
+  const heightDelta = Math.abs(actual.height - expected.height);
+  const tolerance = Math.max(
+    GALLERY_DIMENSION_TOLERANCE_FRACTION * expected.height,
+    GALLERY_DIMENSION_TOLERANCE_FLOOR_PX
+  );
+  if (heightDelta > tolerance) {
+    return { match: false, reason: 'height-delta', actual, expected, diffPixelRatio: 1, heightDelta };
+  }
+  // Same dimensions: compare directly. Bounded height delta: compare the
+  // overlapping scanlines. Both count differing pixels over the compared area.
+  let diff = 0;
+  const total = actual.width * minHeight;
+  for (let y = 0; y < minHeight; y++) {
+    for (let x = 0; x < actual.width; x++) {
+      const ai = (y * actual.width + x) * 4;
+      const ei = (y * expected.width + x) * 4;
+      if (
+        actual.rgba[ai] !== expected.rgba[ei]
+        || actual.rgba[ai + 1] !== expected.rgba[ei + 1]
+        || actual.rgba[ai + 2] !== expected.rgba[ei + 2]
+        || actual.rgba[ai + 3] !== expected.rgba[ei + 3]
+      ) {
+        diff++;
+      }
+    }
+  }
+  const ratio = total === 0 ? 1 : diff / total;
+  return {
+    match: ratio <= maxDiffPixelRatio,
+    reason: ratio <= maxDiffPixelRatio ? null : 'pixel-diff',
+    actual,
+    expected,
+    diffPixelRatio: ratio,
+    diffPixels: diff,
+    totalPixels: total,
+    comparedHeight: minHeight
+  };
+}
